@@ -71,6 +71,7 @@ LIVE_SESSION = os.getenv("LIVE_SESSION", "AUTO").strip().upper()
 
 # Monitor all requested live engines/timeframes by default.
 MONITOR_ALL_LIVE = os.getenv("MONITOR_ALL_LIVE", "true").strip().lower() == "true"
+MFP_FROZEN_ENABLED = os.getenv("MFP_FROZEN_ENABLED", "true").strip().lower() == "true"
 
 # Exact 15 markets.
 MARKETS = {
@@ -108,6 +109,10 @@ SIGNAL_ENGINES = [
     "57-59_TRUE_REVERSE",
 ]
 ENGINES = SIGNAL_ENGINES[:]
+
+# Nine requested components. MFP_FROZEN is the frozen portfolio layer,
+# not an additional independent signal generator.
+STRATEGY_COMPONENTS = SIGNAL_ENGINES[:] + ["MFP_FROZEN"]
 
 SESSIONS = {
     "S1_03:15_08:15": ("03:15", "08:15"),
@@ -535,13 +540,22 @@ def add_pnl(trades, market):
 # ENGINE HELPERS
 # ============================================================
 def engine_trades(raw, market, engine, tf, session_name):
-    # Locked A/B aliases from the supplied official research:
-    # A = 57-59 OPPOSITE; B = mathematical TRUE REVERSE.
+    # A and B are kept as separate named components, using their supplied
+    # official mechanics. The supplied A source is the completed 57-59
+    # OPPOSITE stream followed by mathematical TRUE REVERSE; B applies the
+    # same mathematical TRUE REVERSE to the completed OPPOSITE stream.
+    # They therefore share the same underlying mechanics but remain
+    # separately tagged in the nine-component master.
+    original_engine = engine
     if engine == "A":
-        engine = "57-59_OPPOSITE"
-    elif engine == "B":
-        engine = "57-59_TRUE_REVERSE"
-    elif engine == "V3_NORMAL":
+        prepared = prepare_v3(raw, tf, session_name)
+        opposite = add_pnl(run_5759_opposite(prepared), market)
+        return true_reverse_completed_stream(opposite)
+    if engine == "B":
+        prepared = prepare_v3(raw, tf, session_name)
+        opposite = add_pnl(run_5759_opposite(prepared), market)
+        return true_reverse_completed_stream(opposite)
+    if engine == "V3_NORMAL":
         engine = "V3"
     if engine == "V2":
         prepared = prepare_v2(raw, tf, session_name)
@@ -691,7 +705,8 @@ def stream_live(s, account_id):
     print("Session TFs:", "1M-15M")
     print("Daily TFs:", "1M,3M,5M,15M,30M,1H")
     print("Signal engines:", ", ".join(SIGNAL_ENGINES))
-    print("Portfolio layer: MFP_FROZEN")
+    print("Nine components:", ", ".join(STRATEGY_COMPONENTS))
+    print("MFP frozen layer:", "ENABLED" if MFP_FROZEN_ENABLED else "DISABLED")
     print("Monitor all:", MONITOR_ALL_LIVE)
     print("Selected execution:", LIVE_EXECUTION_ENGINE, "TF", LIVE_TF, "SESSION", LIVE_SESSION)
     print("Orders:", "ENABLED (PRACTICE)" if LIVE_TRADING_ENABLED else "DRY-RUN")
@@ -955,11 +970,15 @@ def main():
     print("Session TFs: 1M through 15M")
     print("Full-day TFs: 1M, 3M, 5M, 15M, 30M, 1H")
     print("Engines:", ", ".join(ENGINES))
+    print("Nine components:", ", ".join(STRATEGY_COMPONENTS))
+    print("MFP frozen layer:", "ENABLED" if MFP_FROZEN_ENABLED else "DISABLED")
     print("Orders:", "ENABLED (PRACTICE)" if LIVE_TRADING_ENABLED else "DRY-RUN")
     print("Time state:", trading_state())
     print("=" * 100)
 
     if MASTER_MODE == "LIVE":
+        print("[NINE-COMPONENT MODE] All 8 signal engines + frozen MFP layer enabled.", flush=True)
+        print("[EXECUTION SAFETY] Only LIVE_EXECUTION_ENGINE / LIVE_TF / LIVE_SESSION may place orders.", flush=True)
         stream_live(s, account_id)
     elif MASTER_MODE == "DAILY_RESEARCH":
         run_daily_research(s)
