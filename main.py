@@ -2,7 +2,7 @@
 """
 OANDA 15-MARKET / MULTI-TIMEFRAME MASTER
 
-ONE CODE, FOUR STRATEGY FAMILIES + FROZEN MFP REFERENCE
+ONE CODE, NINE STRATEGY FAMILIES + FROZEN MFP REFERENCE
 
 Live/session framework:
   - 15 OANDA markets
@@ -97,13 +97,17 @@ SESSION_TFS = list(range(1, 16))
 # Full-day test group.
 DAILY_TFS = [1, 3, 5, 15, 30, 60]
 
-ENGINES = [
+SIGNAL_ENGINES = [
+    "A",
+    "B",
     "V2",
-    "V3",
+    "V3_NORMAL",
+    "V3_OPPOSITE",
     "57-59_NORMAL",
     "57-59_OPPOSITE",
     "57-59_TRUE_REVERSE",
 ]
+ENGINES = SIGNAL_ENGINES[:]
 
 SESSIONS = {
     "S1_03:15_08:15": ("03:15", "08:15"),
@@ -531,12 +535,23 @@ def add_pnl(trades, market):
 # ENGINE HELPERS
 # ============================================================
 def engine_trades(raw, market, engine, tf, session_name):
+    # Locked A/B aliases from the supplied official research:
+    # A = 57-59 OPPOSITE; B = mathematical TRUE REVERSE.
+    if engine == "A":
+        engine = "57-59_OPPOSITE"
+    elif engine == "B":
+        engine = "57-59_TRUE_REVERSE"
+    elif engine == "V3_NORMAL":
+        engine = "V3"
     if engine == "V2":
         prepared = prepare_v2(raw, tf, session_name)
         return add_pnl(run_frozen_mechanics(prepared), market)
     if engine == "V3" or engine == "57-59_NORMAL":
         prepared = prepare_v3(raw, tf, session_name)
         return add_pnl(run_frozen_mechanics(prepared), market)
+    if engine == "V3_OPPOSITE":
+        prepared = prepare_v3(raw, tf, session_name)
+        return add_pnl(run_5759_opposite(prepared), market)
     if engine == "57-59_OPPOSITE":
         prepared = prepare_v3(raw, tf, session_name)
         return add_pnl(run_5759_opposite(prepared), market)
@@ -599,7 +614,7 @@ def process_live_market(market, state, closed_m1, boundary_ts, s, account_id):
     if session is None:
         return
 
-    engines = ENGINES if MONITOR_ALL_LIVE else [LIVE_EXECUTION_ENGINE]
+    engines = SIGNAL_ENGINES if MONITOR_ALL_LIVE else [LIVE_EXECUTION_ENGINE]
     tfs = SESSION_TFS if MONITOR_ALL_LIVE else [LIVE_TF]
 
     for engine in engines:
@@ -665,7 +680,8 @@ def stream_live(s, account_id):
     print("Markets:", len(MARKETS))
     print("Session TFs:", "1M-15M")
     print("Daily TFs:", "1M,3M,5M,15M,30M,1H")
-    print("Engines:", ", ".join(ENGINES))
+    print("Signal engines:", ", ".join(SIGNAL_ENGINES))
+    print("Portfolio layer: MFP_FROZEN")
     print("Monitor all:", MONITOR_ALL_LIVE)
     print("Selected execution:", LIVE_EXECUTION_ENGINE, "TF", LIVE_TF, "SESSION", LIVE_SESSION)
     print("Orders:", "ENABLED (PRACTICE)" if LIVE_TRADING_ENABLED else "DRY-RUN")
@@ -827,15 +843,21 @@ def run_daily_research(s):
             continue
 
         for tf in DAILY_TFS:
-            for engine in ENGINES:
+            for engine in SIGNAL_ENGINES:
                 # Full-day means no S1/S2/S3 restriction here.
-                if engine == "V2":
+                if engine == "A":
+                    prepared = add_ha(resample_tf(raw, tf))
+                    trades = run_5759_opposite(prepared)
+                elif engine == "B":
+                    prepared = add_ha(resample_tf(raw, tf))
+                    trades = true_reverse_completed_stream(add_pnl(run_5759_opposite(prepared), market))
+                elif engine == "V2":
                     prepared = add_ha(resample_tf(raw, tf))
                     trades = run_frozen_mechanics(prepared)
-                elif engine in ("V3", "57-59_NORMAL"):
+                elif engine in ("V3", "V3_NORMAL", "57-59_NORMAL"):
                     prepared = add_ha(resample_tf(raw, tf))
                     trades = run_frozen_mechanics(prepared)
-                elif engine == "57-59_OPPOSITE":
+                elif engine in ("V3_OPPOSITE", "57-59_OPPOSITE"):
                     prepared = add_ha(resample_tf(raw, tf))
                     trades = run_5759_opposite(prepared)
                 else:
@@ -896,7 +918,8 @@ def print_status(s, account_id):
     print("Session TFs:", SESSION_TFS)
     print("Daily TFs:", DAILY_TFS)
     print("Sessions:", SESSIONS)
-    print("Engines:", ENGINES)
+    print("Signal engines:", SIGNAL_ENGINES)
+    print("Portfolio layer: MFP_FROZEN")
     print("Selected execution:", LIVE_EXECUTION_ENGINE, LIVE_TF, LIVE_SESSION)
     print("Monitor all live:", MONITOR_ALL_LIVE)
     print("Market open UTC:", MARKET_OPEN_UTC, "+", OPEN_DELAY_HOURS, "h")
