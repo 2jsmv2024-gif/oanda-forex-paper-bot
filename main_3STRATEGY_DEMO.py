@@ -2,7 +2,7 @@
 """
 OANDA 15-MARKET / MULTI-TIMEFRAME MASTER
 
-ONE CODE, THREE WEEK-DEMO STRATEGIES + FROZEN MFP REFERENCE
+ONE CODE, NINE STRATEGY FAMILIES + FROZEN MFP REFERENCE
 
 Live/session framework:
   - 15 OANDA markets
@@ -27,9 +27,8 @@ Time protection:
 Safety:
   - OANDA Practice by default
   - DRY-RUN by default
-  - all 3 strategies are monitored across all requested session/full-day systems
-  - virtual performance is tracked independently for every market/TF/session system
-  - OANDA orders remain DRY-RUN until explicitly enabled
+  - one selected live execution combination at a time
+  - all other engines/timeframes are monitored and logged
   - frozen MFP source is NOT rewritten
 
 IMPORTANT:
@@ -66,12 +65,9 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 MASTER_MODE = os.getenv("MASTER_MODE", "LIVE").strip().upper()
 
 # Live execution: ONE selected combination may send orders.
-LIVE_EXECUTION_ENGINE = os.getenv("LIVE_EXECUTION_ENGINE", "ALL3").strip().upper()
-LIVE_TF = int(os.getenv("LIVE_TF", "0"))  # 0 = all session TFs 1-15
-LIVE_SESSION = os.getenv("LIVE_SESSION", "AUTO").strip().upper()  # AUTO = all active sessions
-LIVE_STRATEGIES = [x.strip().upper() for x in os.getenv(
-    "LIVE_STRATEGIES", "A_TRUE_REVERSE,B_TRUE_REVERSE,V3_OPPOSITE"
-).split(",") if x.strip()]
+LIVE_EXECUTION_ENGINE = os.getenv("LIVE_EXECUTION_ENGINE", "57-59_NORMAL").strip().upper()
+LIVE_TF = int(os.getenv("LIVE_TF", "15"))
+LIVE_SESSION = os.getenv("LIVE_SESSION", "AUTO").strip().upper()
 
 # Monitor all requested live engines/timeframes by default.
 MONITOR_ALL_LIVE = os.getenv("MONITOR_ALL_LIVE", "true").strip().lower() == "true"
@@ -101,18 +97,17 @@ SESSION_TFS = list(range(1, 16))
 # Full-day test group.
 DAILY_TFS = [1, 3, 5, 15, 30, 60]
 
-ENGINES = [
+SIGNAL_ENGINES = [
+    "A",
+    "B",
     "V2",
-    "V3",
+    "V3_NORMAL",
+    "V3_OPPOSITE",
     "57-59_NORMAL",
     "57-59_OPPOSITE",
     "57-59_TRUE_REVERSE",
 ]
-
-LIVE_STRATEGY_NAMES = ["A_TRUE_REVERSE", "B_TRUE_REVERSE", "V3_OPPOSITE"]
-
-# Full-day live-performance group. No S1/S2/S3 filter.
-FULLDAY_LIVE_TFS = [1, 3, 5, 15, 30, 60]
+ENGINES = SIGNAL_ENGINES[:]
 
 SESSIONS = {
     "S1_03:15_08:15": ("03:15", "08:15"),
@@ -537,44 +532,26 @@ def add_pnl(trades, market):
     return x
 
 # ============================================================
-# THREE WEEK-DEMO STRATEGY ADAPTERS
-# ============================================================
-def strategy_trades(raw, market, strategy, tf, session_name):
-    strategy = strategy.upper()
-    if strategy == "A_TRUE_REVERSE":
-        prepared = prepare_v2(raw, tf, session_name)
-        return true_reverse_completed_stream(add_pnl(run_5759_opposite(prepared), market))
-    if strategy == "B_TRUE_REVERSE":
-        prepared = prepare_v2(raw, tf, session_name)
-        a = add_pnl(run_5759_opposite(prepared), market)
-        return true_reverse_completed_stream(a)
-    if strategy == "V3_OPPOSITE":
-        prepared = prepare_v3(raw, tf, session_name)
-        return add_pnl(run_5759_opposite(prepared), market)
-    raise ValueError(f"Unknown live strategy: {strategy}")
-
-
-def strategy_trades_full_day(raw, market, strategy, tf):
-    strategy = strategy.upper()
-    prepared = add_ha(resample_tf(raw, tf))
-    opposite = add_pnl(run_5759_opposite(prepared), market)
-    if strategy in ("A_TRUE_REVERSE", "B_TRUE_REVERSE"):
-        return true_reverse_completed_stream(opposite)
-    if strategy == "V3_OPPOSITE":
-        return opposite
-    raise ValueError(f"Unknown live strategy: {strategy}")
-
-
-# ============================================================
 # ENGINE HELPERS
 # ============================================================
 def engine_trades(raw, market, engine, tf, session_name):
+    # Locked A/B aliases from the supplied official research:
+    # A = 57-59 OPPOSITE; B = mathematical TRUE REVERSE.
+    if engine == "A":
+        engine = "57-59_OPPOSITE"
+    elif engine == "B":
+        engine = "57-59_TRUE_REVERSE"
+    elif engine == "V3_NORMAL":
+        engine = "V3"
     if engine == "V2":
         prepared = prepare_v2(raw, tf, session_name)
         return add_pnl(run_frozen_mechanics(prepared), market)
     if engine == "V3" or engine == "57-59_NORMAL":
         prepared = prepare_v3(raw, tf, session_name)
         return add_pnl(run_frozen_mechanics(prepared), market)
+    if engine == "V3_OPPOSITE":
+        prepared = prepare_v3(raw, tf, session_name)
+        return add_pnl(run_5759_opposite(prepared), market)
     if engine == "57-59_OPPOSITE":
         prepared = prepare_v3(raw, tf, session_name)
         return add_pnl(run_5759_opposite(prepared), market)
@@ -605,9 +582,6 @@ class LiveMarketState:
         self.raw = pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
         self.last_processed = {}
         self.last_signature = {}
-        self.trade_signatures = set()
-        self.performance_file = OUTPUT_DIR / "WEEK_DEMO_LIVE_TRADES.csv"
-        self.performance_file.parent.mkdir(parents=True, exist_ok=True)
 
     def append(self, candle):
         row = pd.DataFrame([candle])
@@ -633,171 +607,63 @@ def tf_bucket_closed(ts, tf):
     return ts.minute % tf == 0
 
 
-def _event_signature(row, market, strategy, tf, scope):
-    return (
-        market, strategy, int(tf), scope,
-        str(row.get("entry_time", "")),
-        str(row.get("exit_time", "")),
-        str(row.get("side", "")),
-        str(row.get("reason", "")),
-    )
-
-
-def _append_performance(market, strategy, tf, scope, session_name, trades, bucket_start, state):
-    """Persist newly completed virtual trades for the one-week comparison.
-
-    This ledger is independent for every strategy/market/TF/scope, so an
-    OANDA account-level position cannot contaminate the research comparison.
-    """
-    if trades.empty:
-        return
-    x = trades.copy()
-    x["entry_time"] = pd.to_datetime(x["entry_time"], utc=True)
-    x["exit_time"] = pd.to_datetime(x["exit_time"], utc=True)
-    x = x[x["exit_time"] < pd.Timestamp(bucket_start)].copy()
-    if x.empty:
-        return
-
-    rows = []
-    for _, tr in x.iterrows():
-        sig = _event_signature(tr, market, strategy, tf, scope)
-        if sig in state.trade_signatures:
-            continue
-        state.trade_signatures.add(sig)
-        rows.append({
-            "market": market,
-            "strategy": strategy,
-            "scope": scope,
-            "session": session_name if scope == "SESSION" else "FULL_DAY",
-            "tf_minutes": int(tf),
-            "entry_time": tr["entry_time"].isoformat(),
-            "exit_time": tr["exit_time"].isoformat(),
-            "side": str(tr["side"]),
-            "entry": float(tr["entry"]),
-            "exit": float(tr["exit"]),
-            "gross": float(tr.get("gross", 0.0)),
-            "spread_cost": float(tr.get("spread_cost", 0.0)),
-            "net": float(tr.get("net", 0.0)),
-            "reason": str(tr.get("reason", "")),
-        })
-    if not rows:
-        return
-    out = pd.DataFrame(rows)
-    header = not state.performance_file.exists()
-    out.to_csv(state.performance_file, mode="a", header=header, index=False)
-    for r in rows:
-        print(
-            f"[WEEK-DEMO TRADE] {r['market']} {r['strategy']} "
-            f"{r['scope']} TF={r['tf_minutes']} {r['session']} "
-            f"{r['side']} NET={r['net']:.6f} reason={r['reason']}",
-            flush=True,
-        )
-
-
-def _process_one_system(market, state, raw, strategy, tf, scope, session_name, bucket_start, s, account_id):
-    if scope == "SESSION":
-        prepared = (
-            prepare_v2(raw, tf, session_name)
-            if strategy in ("A_TRUE_REVERSE", "B_TRUE_REVERSE")
-            else prepare_v3(raw, tf, session_name)
-        )
-    else:
-        prepared = (
-            add_ha(resample_tf(raw, tf))
-            if strategy in ("A_TRUE_REVERSE", "B_TRUE_REVERSE")
-            else add_ha(resample_tf(raw, tf))
-        )
-
-    if len(prepared) < 3:
-        return
-
-    bucket_start = pd.Timestamp(bucket_start)
-    completed = prepared[
-        pd.to_datetime(prepared["datetime"], utc=True) < bucket_start
-    ].reset_index(drop=True)
-    if len(completed) < 3:
-        return
-
-    signature = pd.Timestamp(completed.iloc[-1]["datetime"])
-    key = (strategy, scope, tf, session_name if scope == "SESSION" else "FULL_DAY")
-    if state.last_processed.get(key) == signature:
-        return
-    state.last_processed[key] = signature
-
-    trades = strategy_trades(
-        raw, market, strategy, tf,
-        session_name if scope == "SESSION" else None,
-    ) if scope == "SESSION" else strategy_trades_full_day(raw, market, strategy, tf)
-    if trades.empty:
-        return
-
-    # Record all trades that have actually closed by this boundary.
-    _append_performance(
-        market, strategy, tf, scope, session_name,
-        trades, bucket_start, state,
-    )
-
-    # A new entry is only a live signal when the newest completed strategy bar
-    # is the trade's entry bar. Never treat END_OF_DATA as an entry signal.
-    candidates = trades.copy()
-    candidates["entry_time"] = pd.to_datetime(candidates["entry_time"], utc=True)
-    candidates = candidates[candidates["entry_time"] == signature]
-    candidates = candidates[candidates["reason"].astype(str) != "END_OF_DATA"]
-    if candidates.empty:
-        return
-
-    last = candidates.iloc[-1]
-    event_key = (
-        strategy, scope, tf, session_name if scope == "SESSION" else "FULL_DAY",
-        str(last["entry_time"]), str(last["side"]), str(last.get("reason", "")),
-    )
-    if state.last_signature.get(key) == event_key:
-        return
-    state.last_signature[key] = event_key
-
-    side = str(last["side"]).upper()
-    print(
-        f"[3-STRATEGY SIGNAL] {market} {strategy} {scope} "
-        f"TF={tf} {session_name if scope == 'SESSION' else 'FULL_DAY'} "
-        f"{side} entry_time={signature} reason={last.get('reason', '')}",
-        flush=True,
-    )
-
-    # All requested systems are monitored. When order execution is enabled,
-    # each signal may request a Practice order. The OANDA account remains a
-    # shared account, so the independent comparison is always the CSV ledger.
-    if LIVE_EXECUTION_ENGINE == "ALL3" and strategy in LIVE_STRATEGIES and LIVE_TRADING_ENABLED:
-        execute_signal(s, account_id, MARKETS[market], side, strategy)
-
-
 def process_live_market(market, state, closed_m1, boundary_ts, s, account_id):
-    """Process ALL requested session and full-day systems from the M1 stream."""
     state.append(closed_m1)
     raw = state.raw
     session = current_session_name(closed_m1["datetime"])
+    if session is None:
+        return
 
-    # Session systems: all 1M-15M for the currently active S1/S2/S3.
-    if session is not None:
-        for strategy in LIVE_STRATEGIES:
-            for tf in SESSION_TFS:
-                if LIVE_TF and tf != LIVE_TF:
-                    continue
-                if not tf_bucket_closed(pd.Timestamp(boundary_ts), tf):
-                    continue
-                _process_one_system(
-                    market, state, raw, strategy, tf, "SESSION", session,
-                    boundary_ts, s, account_id,
-                )
+    engines = SIGNAL_ENGINES if MONITOR_ALL_LIVE else [LIVE_EXECUTION_ENGINE]
+    tfs = SESSION_TFS if MONITOR_ALL_LIVE else [LIVE_TF]
 
-    # Full-day systems: 1M, 3M, 5M, 15M, 30M, 1H, with no session filter.
-    for strategy in LIVE_STRATEGIES:
-        for tf in FULLDAY_LIVE_TFS:
+    for engine in engines:
+        for tf in tfs:
+            # A TF closes when a new M1 candle begins at a TF boundary.
             if not tf_bucket_closed(pd.Timestamp(boundary_ts), tf):
                 continue
-            _process_one_system(
-                market, state, raw, strategy, tf, "FULL_DAY", None,
-                boundary_ts, s, account_id,
+
+            key = (engine, tf, session)
+            prepared = prepare_v2(raw, tf, session) if engine == "V2" else prepare_v3(raw, tf, session)
+            if len(prepared) < 3:
+                continue
+
+            # The just-closed M1 is at the start of the current TF bucket only
+            # when its minute is a boundary. The latest completed TF is therefore
+            # the final row at that boundary minus the currently forming bucket.
+            # Use all fully completed buckets only.
+            bucket_start = pd.Timestamp(closed_m1["datetime"])
+            completed = prepared[pd.to_datetime(prepared["datetime"], utc=True) < bucket_start].reset_index(drop=True)
+            if len(completed) < 3:
+                continue
+
+            signature = pd.Timestamp(completed.iloc[-1]["datetime"])
+            if state.last_processed.get(key) == signature:
+                continue
+            state.last_processed[key] = signature
+
+            # Replay only the completed data and extract the latest completed trade entry.
+            trades = engine_trades(completed, market, engine, tf, session)
+            if trades.empty:
+                continue
+            last = trades.iloc[-1]
+            entry_time = pd.Timestamp(last["entry_time"])
+            sig_key = (engine, tf, session)
+            signature2 = (entry_time, str(last["side"]), str(last.get("reason", "")))
+            if state.last_signature.get(sig_key) == signature2:
+                continue
+            state.last_signature[sig_key] = signature2
+
+            print(
+                f"[SIGNAL] {market} {engine} TF={tf} {session} "
+                f"{last['side']} entry_time={entry_time} reason={last.get('reason', '')}",
+                flush=True,
             )
+
+            # Only the explicitly selected live combination is allowed to send an order.
+            session_selected = LIVE_SESSION == "AUTO" or LIVE_SESSION == session.split("_")[0]
+            if engine == LIVE_EXECUTION_ENGINE and tf == LIVE_TF and session_selected:
+                execute_signal(s, account_id, MARKETS[market], str(last["side"]), engine)
 
 # ============================================================
 # LIVE OANDA M1 STREAM
@@ -814,9 +680,10 @@ def stream_live(s, account_id):
     print("Markets:", len(MARKETS))
     print("Session TFs:", "1M-15M")
     print("Daily TFs:", "1M,3M,5M,15M,30M,1H")
-    print("Engines:", ", ".join(ENGINES))
-    print("Monitor all requested systems: True")
-    print("Week-demo execution:", LIVE_EXECUTION_ENGINE, "ALL SESSION TFs=1-15", "FULL-DAY TFs=1,3,5,15,30,60")
+    print("Signal engines:", ", ".join(SIGNAL_ENGINES))
+    print("Portfolio layer: MFP_FROZEN")
+    print("Monitor all:", MONITOR_ALL_LIVE)
+    print("Selected execution:", LIVE_EXECUTION_ENGINE, "TF", LIVE_TF, "SESSION", LIVE_SESSION)
     print("Orders:", "ENABLED (PRACTICE)" if LIVE_TRADING_ENABLED else "DRY-RUN")
     print("Time state:", trading_state())
     print("=" * 100)
@@ -976,15 +843,21 @@ def run_daily_research(s):
             continue
 
         for tf in DAILY_TFS:
-            for engine in ENGINES:
+            for engine in SIGNAL_ENGINES:
                 # Full-day means no S1/S2/S3 restriction here.
-                if engine == "V2":
+                if engine == "A":
+                    prepared = add_ha(resample_tf(raw, tf))
+                    trades = run_5759_opposite(prepared)
+                elif engine == "B":
+                    prepared = add_ha(resample_tf(raw, tf))
+                    trades = true_reverse_completed_stream(add_pnl(run_5759_opposite(prepared), market))
+                elif engine == "V2":
                     prepared = add_ha(resample_tf(raw, tf))
                     trades = run_frozen_mechanics(prepared)
-                elif engine in ("V3", "57-59_NORMAL"):
+                elif engine in ("V3", "V3_NORMAL", "57-59_NORMAL"):
                     prepared = add_ha(resample_tf(raw, tf))
                     trades = run_frozen_mechanics(prepared)
-                elif engine == "57-59_OPPOSITE":
+                elif engine in ("V3_OPPOSITE", "57-59_OPPOSITE"):
                     prepared = add_ha(resample_tf(raw, tf))
                     trades = run_5759_opposite(prepared)
                 else:
@@ -1045,7 +918,8 @@ def print_status(s, account_id):
     print("Session TFs:", SESSION_TFS)
     print("Daily TFs:", DAILY_TFS)
     print("Sessions:", SESSIONS)
-    print("Engines:", ENGINES)
+    print("Signal engines:", SIGNAL_ENGINES)
+    print("Portfolio layer: MFP_FROZEN")
     print("Selected execution:", LIVE_EXECUTION_ENGINE, LIVE_TF, LIVE_SESSION)
     print("Monitor all live:", MONITOR_ALL_LIVE)
     print("Market open UTC:", MARKET_OPEN_UTC, "+", OPEN_DELAY_HOURS, "h")
