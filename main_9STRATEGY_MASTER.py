@@ -646,7 +646,17 @@ def process_live_market(market, state, closed_m1, boundary_ts, s, account_id):
             trades = engine_trades(completed, market, engine, tf, session)
             if trades.empty:
                 continue
-            last = trades.iloc[-1]
+
+            # IMPORTANT: the replay function closes any still-open position at
+            # the end of the supplied dataframe. That synthetic close is NOT a
+            # new live entry signal. Never execute END_OF_DATA as an entry.
+            candidates = trades[trades["reason"].astype(str) != "END_OF_DATA"].copy()
+            if candidates.empty:
+                continue
+
+            # The newest completed trade event is the actual strategy event
+            # that can be acted upon. END_OF_DATA is deliberately excluded.
+            last = candidates.iloc[-1]
             entry_time = pd.Timestamp(last["entry_time"])
             sig_key = (engine, tf, session)
             signature2 = (entry_time, str(last["side"]), str(last.get("reason", "")))
