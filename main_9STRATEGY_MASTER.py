@@ -294,17 +294,12 @@ def execute_signal(s, account_id, instrument, side, strategy_name):
     if units == 0:
         return None
 
-    pos = get_position(s, account_id, instrument)
-    current = position_units(pos)
-    if current:
-        current_side = "BUY" if current > 0 else "SELL"
-        if current_side != side:
-            close_instrument(s, account_id, instrument)
-            time.sleep(0.5)
-        else:
-            print(f"[DUPLICATE BLOCKED] {instrument} {side} {strategy_name}", flush=True)
-            return None
-
+    # ALL-ENGINE VERIFICATION MODE:
+    # Do not suppress an order because another strategy already has a
+    # position on this instrument. Every qualifying strategy event is sent
+    # to OANDA so we can verify the complete signal -> order -> fill path.
+    # OANDA positionFill=DEFAULT determines how the broker applies the
+    # new order to the existing position.
     signed = units if side == "BUY" else -units
     payload = {
         "order": {
@@ -684,10 +679,18 @@ def process_live_market(market, state, closed_m1, boundary_ts, s, account_id):
                 flush=True,
             )
 
-            # Only the explicitly selected live combination is allowed to send an order.
-            session_selected = LIVE_SESSION == "AUTO" or LIVE_SESSION == session.split("_")[0]
-            if engine == LIVE_EXECUTION_ENGINE and tf == LIVE_TF and session_selected:
-                execute_signal(s, account_id, MARKETS[market], str(last["side"]), engine)
+            # ALL 8 SIGNAL ENGINES ARE LIVE-EXECUTION ENABLED.
+            # Every engine/TF/session that produces a qualifying signal may
+            # place its own OANDA order. There is intentionally NO
+            # LIVE_EXECUTION_ENGINE / LIVE_TF / LIVE_SESSION execution gate.
+            execution_name = f"{engine}_TF{tf}_{session}"
+            execute_signal(
+                s,
+                account_id,
+                MARKETS[market],
+                str(last["side"]),
+                execution_name,
+            )
 
 # ============================================================
 # LIVE OANDA M1 STREAM
@@ -972,13 +975,15 @@ def main():
     print("Engines:", ", ".join(ENGINES))
     print("Nine components:", ", ".join(STRATEGY_COMPONENTS))
     print("MFP frozen layer:", "ENABLED" if MFP_FROZEN_ENABLED else "DISABLED")
+    print("Execution: ALL 8 SIGNAL ENGINES MAY PLACE ORDERS")
     print("Orders:", "ENABLED (PRACTICE)" if LIVE_TRADING_ENABLED else "DRY-RUN")
     print("Time state:", trading_state())
     print("=" * 100)
 
     if MASTER_MODE == "LIVE":
         print("[NINE-COMPONENT MODE] All 8 signal engines + frozen MFP layer enabled.", flush=True)
-        print("[EXECUTION SAFETY] Only LIVE_EXECUTION_ENGINE / LIVE_TF / LIVE_SESSION may place orders.", flush=True)
+        print("[ALL-ENGINE EXECUTION] Every qualifying signal from all 8 signal engines may place an OANDA order.", flush=True)
+        print("[MFP SAFETY] Frozen MFP remains separate from direct signal execution.", flush=True)
         stream_live(s, account_id)
     elif MASTER_MODE == "DAILY_RESEARCH":
         run_daily_research(s)
