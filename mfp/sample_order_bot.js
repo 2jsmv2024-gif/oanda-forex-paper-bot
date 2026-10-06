@@ -151,7 +151,7 @@ async function sendImmediateBuy(currentPrice) {
     expected_price: currentPrice
   }}));
   } catch (e) {
-    console.error("[SAMPLE ORDER ERROR] message=" + (e?.message || e) + " keys=" + Object.keys(e || {}).join(",") + " status=" + (e?.status ?? "") + " details=" + JSON.stringify(e?.details ?? null) + " body=" + JSON.stringify(e?.body ?? e?.data ?? null));
+    console.error("[SAMPLE ORDER ERROR] message=" + (e?.message || e) + " status=" + (e?.status ?? "") + " code=" + String(e?.code ?? "") + " error=" + String(e?.error ?? ""));
     throw e;
   }
 
