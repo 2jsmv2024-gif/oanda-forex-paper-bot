@@ -50,6 +50,15 @@ import pandas as pd
 import requests
 
 # ============================================================
+# OANDA ORDER THROTTLE / RETRY PROTECTION
+# ============================================================
+# Keep all strategy signals intact; only serialize broker POST requests.
+ORDER_MIN_INTERVAL_SEC = float(os.getenv("OANDA_ORDER_MIN_INTERVAL_SEC", "0.75"))
+ORDER_MAX_RETRIES = int(os.getenv("OANDA_ORDER_MAX_RETRIES", "5"))
+ORDER_BACKOFF_BASE_SEC = float(os.getenv("OANDA_ORDER_BACKOFF_BASE_SEC", "1.0"))
+_LAST_ORDER_REQUEST_MONOTONIC = 0.0
+
+# ============================================================
 # CONFIG
 # ============================================================
 REST_URL = os.getenv("OANDA_BASE_URL", "https://api-fxpractice.oanda.com").rstrip("/")
@@ -281,6 +290,25 @@ def close_all_positions(s, account_id):
             print("[CLOSE ERROR]", instrument, repr(e), flush=True)
 
 
+def _wait_for_order_slot():
+    global _LAST_ORDER_REQUEST_MONOTONIC
+    now = time.monotonic()
+    wait = ORDER_MIN_INTERVAL_SEC - (now - _LAST_ORDER_REQUEST_MONOTONIC)
+    if wait > 0:
+        time.sleep(wait)
+    _LAST_ORDER_REQUEST_MONOTONIC = time.monotonic()
+
+
+def _safe_order_error_body(response):
+    try:
+        data = response.json()
+        if isinstance(data, dict):
+            return json.dumps(data, separators=(",", ":"))[:2000]
+    except Exception:
+        pass
+    return (response.text or "")[:2000]
+
+
 def execute_signal(s, account_id, instrument, side, strategy_name):
     side = side.upper()
     if trading_state() != "TRADING":
@@ -294,12 +322,9 @@ def execute_signal(s, account_id, instrument, side, strategy_name):
     if units == 0:
         return None
 
-    # ALL-ENGINE VERIFICATION MODE:
-    # Do not suppress an order because another strategy already has a
-    # position on this instrument. Every qualifying strategy event is sent
-    # to OANDA so we can verify the complete signal -> order -> fill path.
-    # OANDA positionFill=DEFAULT determines how the broker applies the
-    # new order to the existing position.
+    # ALL-ENGINE MODE: every qualifying signal remains eligible for execution.
+    # Broker requests are throttled so simultaneous signals do not burst into
+    # OANDA and trigger 429 rate limiting.
     signed = units if side == "BUY" else -units
     payload = {
         "order": {
@@ -320,14 +345,71 @@ def execute_signal(s, account_id, instrument, side, strategy_name):
             flush=True,
         )
         return {"dry_run": True, **payload}
-    r = s.post(f"{REST_URL}/v3/accounts/{account_id}/orders", json=payload, timeout=20)
-    r.raise_for_status()
-    data = r.json()
-    print("[ORDER ACCEPTED]", json.dumps(data), flush=True)
-    return data
+
+    last_error = None
+    for attempt in range(1, ORDER_MAX_RETRIES + 1):
+        _wait_for_order_slot()
+        try:
+            r = s.post(
+                f"{REST_URL}/v3/accounts/{account_id}/orders",
+                json=payload,
+                timeout=20,
+            )
+        except requests.RequestException as e:
+            # Do not blindly replay an ambiguous timeout: OANDA may already
+            # have accepted the order before the client lost the response.
+            print(
+                f"[ORDER TRANSPORT ERROR] {instrument} {side} "
+                f"engine={strategy_name} attempt={attempt}/{ORDER_MAX_RETRIES}: {e}",
+                flush=True,
+            )
+            return None
+
+        if r.ok:
+            data = r.json()
+            print("[ORDER ACCEPTED]", json.dumps(data), flush=True)
+            return data
+
+        body = _safe_order_error_body(r)
+        if r.status_code == 429 or 500 <= r.status_code <= 599:
+            retry_after = r.headers.get("Retry-After", "")
+            try:
+                retry_wait = float(retry_after)
+            except (TypeError, ValueError):
+                retry_wait = ORDER_BACKOFF_BASE_SEC * (2 ** (attempt - 1))
+            retry_wait = min(max(retry_wait, ORDER_MIN_INTERVAL_SEC), 30.0)
+            print(
+                f"[ORDER RETRY] HTTP {r.status_code} {instrument} {side} "
+                f"engine={strategy_name} attempt={attempt}/{ORDER_MAX_RETRIES} "
+                f"wait={retry_wait:.2f}s body={body}",
+                flush=True,
+            )
+            last_error = RuntimeError(f"HTTP {r.status_code}: {body}")
+            if attempt < ORDER_MAX_RETRIES:
+                time.sleep(retry_wait)
+                continue
+            break
+
+        # Other 4xx responses are deterministic request/account errors.
+        # Do not hammer OANDA with the same invalid request; log the exact
+        # broker response so the cause is visible instead of a generic 400.
+        print(
+            f"[ORDER REJECTED] HTTP {r.status_code} {instrument} {side} "
+            f"engine={strategy_name} body={body}",
+            flush=True,
+        )
+        last_error = RuntimeError(f"HTTP {r.status_code}: {body}")
+        break
+
+    print(
+        f"[ORDER FAILED] {instrument} {side} engine={strategy_name} "
+        f"error={last_error}",
+        flush=True,
+    )
+    return None
 
 # ============================================================
-# CANDLES / HEIKEN ASHI
+
 # ============================================================
 def add_ha(df):
     if df.empty:
