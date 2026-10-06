@@ -12,6 +12,22 @@ const live = (process.env.LIVE_TRADING || "false").toLowerCase() === "true";
 const dry = (process.env.DRY_RUN_ONLY || "true").toLowerCase() === "true";
 const liveConfirm = (process.env.MFP_USER_LIVE_CONFIRMATION || "").trim() === "YES";
 const executionEnabled = live && !dry && liveConfirm;
+const cutoffIst = (process.env.SAMPLE_CUTOFF_IST || "02:55").trim();
+
+function istMinutesNow() {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false
+  }).formatToParts(new Date());
+  const h = +(parts.find(x => x.type === "hour")?.value || 0);
+  const m = +(parts.find(x => x.type === "minute")?.value || 0);
+  return h * 60 + m;
+}
+
+function entriesDisabledByCutoff() {
+  const [h, m] = cutoffIst.split(":").map(Number);
+  return Number.isFinite(h) && Number.isFinite(m) && istMinutesNow() >= h * 60 + m;
+}
+
 
 const client = new MyFundedPerps({ apiKey: key });
 let accountId = (process.env.MFP_ACCOUNT_ID || "").trim();
@@ -110,6 +126,11 @@ let stopTriggered = false;
 
 async function sendImmediateBuy(currentPrice) {
   console.log(`[SAMPLE SIGNAL] IMMEDIATE BUY qty=${qty} currentPrice=${currentPrice} SL_DISTANCE=${slDistance}`);
+
+  if (entriesDisabledByCutoff()) {
+    console.log(`[SAMPLE CUTOFF] IST cutoff ${cutoffIst} reached; new entries disabled`);
+    return;
+  }
 
   if (!executionEnabled) {
     console.log(`[SAMPLE DRY] order NOT submitted executionEnabled=${executionEnabled}`);
@@ -253,7 +274,7 @@ if (!Number.isFinite(slDistance) || slDistance <= 0) {
   throw new Error("Invalid SL_DISTANCE; expected positive price distance");
 }
 
-console.log(`[SAMPLE BOT] market=${market} qty=${qty} IMMEDIATE_BUY=true SL_DISTANCE=${slDistance}`);
+console.log(`[SAMPLE BOT] market=${market} qty=${qty} IMMEDIATE_BUY=true SL_DISTANCE=${slDistance} CUTOFF_IST=${cutoffIst}`);
 console.log(`[SAMPLE BOT] LIVE_TRADING=${live} DRY_RUN_ONLY=${dry} USER_LIVE_CONFIRMATION=${liveConfirm} EXECUTION_ENABLED=${executionEnabled}`);
 
 await account();
@@ -292,6 +313,10 @@ while (true) {
           entry = entryPrice(existing) || price;
           armed = true;
           console.log(`[SAMPLE EXISTING POSITION] id=${positionId} entry=${entry} stop=${entry - slDistance}`);
+        } else if (entriesDisabledByCutoff()) {
+          console.log(`[SAMPLE CUTOFF] ${cutoffIst} IST reached; no new BUY will be submitted`);
+          // No new entry after cutoff. Keep the process alive only for monitoring/recovery.
+          await new Promise(r => setTimeout(r, 5000));
         } else {
           // Immediate market BUY on the first valid live price.
           await sendImmediateBuy(price);
@@ -299,6 +324,14 @@ while (true) {
       }
 
       if (armed) await closeForStop(price);
+
+      // After cutoff, this test bot never opens another position. Once the
+      // existing test position is closed, exit cleanly so Railway does not
+      // restart it under the ON_FAILURE policy.
+      if (entriesDisabledByCutoff() && !armed) {
+        console.log(`[SAMPLE CUTOFF] no open position; exiting cleanly after ${cutoffIst} IST`);
+        process.exit(0);
+      }
     }
     console.log(`[SAMPLE STREAM] iterator ended; receivedTicks=${receivedTicks}; reconnecting`);
   } catch (err) {
