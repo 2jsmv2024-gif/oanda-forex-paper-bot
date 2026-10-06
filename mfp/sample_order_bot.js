@@ -4,7 +4,9 @@ const key = (process.env.MFP_API_KEY || "").trim();
 const market = process.env.MFP_MARKET_ID || "hyperliquid|xyz:GOLD";
 const qty = 0.001;
 const leverage = +(process.env.MFP_LEVERAGE || "5");
-const offset = +(process.env.TEST_PRICE_OFFSET || "1");
+
+const buyAbove = +(process.env.BUY_ABOVE_PRICE || "4166");
+const sellBelow = +(process.env.SELL_BELOW_PRICE || "4160");
 
 const live = (process.env.LIVE_TRADING || "false").toLowerCase() === "true";
 const dry = (process.env.DRY_RUN_ONLY || "true").toLowerCase() === "true";
@@ -51,12 +53,11 @@ async function sendOrder(side, price) {
   console.log(JSON.stringify(unwrap(result)));
 }
 
-if (!key) throw new Error("MFP_API_KEY missing");
-if (!Number.isFinite(offset) || offset <= 0) {
-  throw new Error("TEST_PRICE_OFFSET must be a positive number");
+if (!Number.isFinite(buyAbove) || !Number.isFinite(sellBelow) || buyAbove <= sellBelow) {
+  throw new Error("Invalid levels: BUY_ABOVE_PRICE must be greater than SELL_BELOW_PRICE");
 }
 
-console.log(`[SAMPLE BOT] market=${market} qty=0.001 offset=±${offset}`);
+console.log(`[SAMPLE BOT] market=${market} qty=0.001 BUY_ABOVE=${buyAbove} SELL_BELOW=${sellBelow}`);
 console.log(`[SAMPLE BOT] LIVE_TRADING=${live} DRY_RUN_ONLY=${dry} USER_LIVE_CONFIRMATION=${liveConfirm} EXECUTION_ENABLED=${executionEnabled}`);
 
 await account();
@@ -70,9 +71,6 @@ console.log("[SAMPLE MARKET] stream symbol=" + streamSymbol);
 let buyDone = false;
 let sellDone = false;
 let previous = null;
-let reference = null;
-let buyAbove = null;
-let sellBelow = null;
 
 while (true) {
   try {
@@ -82,13 +80,6 @@ while (true) {
     for await (const tick of stream) {
       const price = +pick(tick, ["price", "mid", "mark"]);
       if (!Number.isFinite(price)) continue;
-
-      if (reference == null) {
-        reference = price;
-        buyAbove = reference + offset;
-        sellBelow = reference - offset;
-        console.log(`[SAMPLE LEVELS] reference=${reference} BUY_ABOVE=${buyAbove} SELL_BELOW=${sellBelow}`);
-      }
 
       if (previous != null) {
         if (!buyDone && previous < buyAbove && price >= buyAbove) {
