@@ -147,7 +147,8 @@ async function sendImmediateBuy(currentPrice) {
     type: "market",
     size: qty,
     leverage,
-    margin_mode: "cross"
+    margin_mode: "cross",
+    expected_price: currentPrice
   }}));
   } catch (e) {
     console.error("[SAMPLE ORDER ERROR] message=" + (e?.message || e) + " keys=" + Object.keys(e || {}).join(",") + " status=" + (e?.status ?? "") + " details=" + JSON.stringify(e?.details ?? null) + " body=" + JSON.stringify(e?.body ?? e?.data ?? null));
