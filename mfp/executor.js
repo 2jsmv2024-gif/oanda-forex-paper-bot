@@ -31,5 +31,5 @@ if(!key)throw Error("MFP_API_KEY missing");
 console.log(`[MFP EXECUTOR] PRIMARY_ENGINE=57-59 MARKET=${market} LIVE_TRADING=${live} DRY_RUN_ONLY=${dry}`);
 await account();console.log("[MFP AUTH] authenticated; account ready");
 const stream=new PriceStream({symbols:[market]});console.log("[MFP STREAM] GOLD connected");
-for await(const t of stream.read()){let p=+v(t,["price","mid","mark"]);if(!Number.isFinite(p))continue;let ts=+v(t,["timestamp","time","ts"])||Date.now(),m=Math.floor(ts/60000)*60000;
+for await(const t of stream){let p=+v(t,["price","mid","mark"]);if(!Number.isFinite(p))continue;let ts=+v(t,["timestamp","time","ts"])||Date.now(),m=Math.floor(ts/60000)*60000;
 if(!cur||cur.ts!=m)minute({ts:m,open:p,high:p,low:p,close:p});else minute({ts:m,open:cur.open,high:Math.max(cur.high,p),low:Math.min(cur.low,p),close:p})}
