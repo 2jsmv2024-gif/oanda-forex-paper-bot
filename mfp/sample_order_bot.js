@@ -214,9 +214,10 @@ await account();
 console.log("[SAMPLE AUTH] authenticated; account ready");
 
 const mi = unwrap(await client.getMarket({ market_id: market }));
-const streamSymbol = pick(mi, ["symbol", "stream_symbol", "market_symbol", "ticker", "name"]);
-if (!streamSymbol) throw new Error("MFP stream symbol unavailable");
-console.log("[SAMPLE MARKET] stream symbol=" + streamSymbol);
+const marketUiSymbol = pick(mi, ["symbol", "market_symbol", "ticker", "name"]);
+const streamSymbol = "GOLD-USD";
+if (!marketUiSymbol) throw new Error("MFP market metadata unavailable");
+console.log("[SAMPLE MARKET] API symbol=" + marketUiSymbol + " PriceStream symbol=" + streamSymbol);
 
 while (true) {
   try {
