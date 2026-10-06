@@ -213,10 +213,12 @@ async function closeForStop(currentPrice) {
   }
 
   const pid = pick(p, ["position_id", "positionId", "id"]);
-  await client.closePosition({ body: {
-    account_id: await account(),
-    position_id: pid
-  }});
+  await client.closePosition({
+    position_id: pid,
+    body: {
+      account_id: await account()
+    }
+  });
 
   console.log(`[SAMPLE STOP CLOSE ACCEPTED] position=${pid} current=${currentPrice} stop=${stop}`);
 }
