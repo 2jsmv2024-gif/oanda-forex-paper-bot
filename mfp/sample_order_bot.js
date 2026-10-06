@@ -287,6 +287,7 @@ if (fixedSlPrice <= 0 && (!Number.isFinite(slDistance) || slDistance <= 0)) {
 
 console.log(`[SAMPLE BOT] market=${market} qty=${qty} IMMEDIATE_BUY=true SL_DISTANCE=${slDistance} FIXED_SL_PRICE=${fixedSlPrice || "none"} CUTOFF_IST=${cutoffIst}`);
 console.log(`[SAMPLE BOT] LIVE_TRADING=${live} DRY_RUN_ONLY=${dry} USER_LIVE_CONFIRMATION=${liveConfirm} EXECUTION_ENABLED=${executionEnabled}`);
+console.log("[SDK CLOSE FN] " + String(client.closePosition).slice(0,5000));
 
 await account();
 console.log("[SAMPLE AUTH] authenticated; account ready");
