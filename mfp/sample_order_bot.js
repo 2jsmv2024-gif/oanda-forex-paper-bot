@@ -213,13 +213,28 @@ async function closeForStop(currentPrice) {
   }
 
   const pid = pick(p, ["position_id", "positionId", "id"]);
+  const rawSize = pick(p, ["size", "quantity", "qty", "position_size", "positionSize"]);
+  const closeSize = Math.abs(+(rawSize || qty));
+  const posSide = String(pick(p, ["side", "position_side", "positionSide"]) || "long").toLowerCase();
+  const closeSide = posSide.includes("short") ? "buy" : "sell";
+
+  console.log(`[SAMPLE STOP CLOSE] reduce-only ${closeSide} qty=${closeSize} position=${pid} price=${currentPrice}`);
+
   try {
-    const closeResult = await client.closePosition({
+    const closeResult = unwrap(await client.createOrder({ body: {
       account_id: await account(),
-      position_id: pid
-    });
+      market_id: market,
+      side: closeSide,
+      type: "market",
+      size: closeSize,
+      leverage,
+      margin_mode: "cross",
+      reduce_only: true,
+      expected_price: currentPrice
+    }}));
+
     console.log(`[SAMPLE STOP CLOSE ACCEPTED] position=${pid} current=${currentPrice} stop=${stop}`);
-    console.log("[SAMPLE STOP CLOSE RESULT] " + JSON.stringify(unwrap(closeResult)));
+    console.log("[SAMPLE STOP CLOSE RESULT] " + JSON.stringify(closeResult));
   } catch (e) {
     stopTriggered = false;
     console.error("[SAMPLE STOP CLOSE ERROR] message=" + (e?.message || e) +
@@ -297,7 +312,6 @@ if (fixedSlPrice <= 0 && (!Number.isFinite(slDistance) || slDistance <= 0)) {
 
 console.log(`[SAMPLE BOT] market=${market} qty=${qty} IMMEDIATE_BUY=true SL_DISTANCE=${slDistance} FIXED_SL_PRICE=${fixedSlPrice || "none"} CUTOFF_IST=${cutoffIst}`);
 console.log(`[SAMPLE BOT] LIVE_TRADING=${live} DRY_RUN_ONLY=${dry} USER_LIVE_CONFIRMATION=${liveConfirm} EXECUTION_ENABLED=${executionEnabled}`);
-console.log("[SDK CLOSE FN] " + String(client.closePosition).slice(0,5000));
 
 await account();
 console.log("[SAMPLE AUTH] authenticated; account ready");
