@@ -1,21 +1,3 @@
-// Compatibility shim for the SDK's order transport: if the SDK passes a plain
-// object as fetch() body, force JSON serialization + the required content type.
-const nativeFetch = globalThis.fetch;
-globalThis.fetch = async (input, init = {}) => {
-  if (init && init.body && typeof init.body === "object" &&
-      !(init.body instanceof ArrayBuffer) &&
-      !(ArrayBuffer.isView(init.body)) &&
-      !(init.body instanceof URLSearchParams) &&
-      !(typeof FormData !== "undefined" && init.body instanceof FormData) &&
-      !(typeof Blob !== "undefined" && init.body instanceof Blob)) {
-    const headers = new Headers(init.headers || {});
-    if (!headers.has("content-type")) headers.set("content-type", "application/json");
-    init = { ...init, headers, body: JSON.stringify(init.body) };
-    console.log("[SAMPLE FETCH SHIM] serialized object request body as application/json");
-  }
-  return nativeFetch(input, init);
-};
-
 const { MyFundedPerps, PriceStream } = await import("@myfundedperps/sdk");
 
 const key = (process.env.MFP_API_KEY || "").trim();
@@ -32,10 +14,6 @@ const liveConfirm = (process.env.MFP_USER_LIVE_CONFIRMATION || "").trim() === "Y
 const executionEnabled = live && !dry && liveConfirm;
 
 const client = new MyFundedPerps({ apiKey: key });
-let rp = MyFundedPerps.prototype, reqFn = null, reqOwner = null;
-while (rp && !reqFn) { if (typeof rp.request === "function") { reqFn = rp.request; reqOwner = rp; break; } rp = Object.getPrototypeOf(rp); }
-console.log("[SDK PROBE] requestOwner=" + (reqOwner?.constructor?.name || "none") + " requestFn=" + (reqFn ? "yes" : "no"));
-if (reqFn) { const s=String(reqFn); for (const needle of ["fetch(","headers","Content-Type","content-type","JSON.stringify","body","application/json"]) { const i=s.indexOf(needle); if(i>=0) console.log("[SDK PROBE] request " + needle + " @" + i + " " + s.slice(Math.max(0,i-500),Math.min(s.length,i+1400))); } }
 let accountId = (process.env.MFP_ACCOUNT_ID || "").trim();
 
 const unwrap = x => x?.data ?? x;
@@ -131,7 +109,7 @@ let positionId = null;
 let stopTriggered = false;
 
 async function sendImmediateBuy(currentPrice) {
-  console.log(`[SAMPLE SIGNAL] IMMEDIATE BUY qty=0.001 currentPrice=${currentPrice} SL_DISTANCE=${slDistance}`);
+  console.log(`[SAMPLE SIGNAL] IMMEDIATE BUY qty=${qty} currentPrice=${currentPrice} SL_DISTANCE=${slDistance}`);
 
   if (!executionEnabled) {
     console.log(`[SAMPLE DRY] order NOT submitted executionEnabled=${executionEnabled}`);
@@ -155,7 +133,7 @@ async function sendImmediateBuy(currentPrice) {
     throw e;
   }
 
-  console.log("[SAMPLE ORDER ACCEPTED] BUY qty=0.001");
+  console.log(`[SAMPLE ORDER ACCEPTED] BUY qty=${qty}`);
   console.log(JSON.stringify(result));
 
   positionId = pick(result, ["position_id", "positionId", "id"]) || null;
@@ -215,15 +193,72 @@ async function closeForStop(currentPrice) {
   console.log(`[SAMPLE STOP CLOSE ACCEPTED] position=${pid} current=${currentPrice} stop=${stop}`);
 }
 
+function positionMarkPrice(p) {
+  return +(pick(p, [
+    "mark_price", "markPrice", "mark", "current_price", "currentPrice",
+    "last_price", "lastPrice", "price"
+  ]) || 0);
+}
+
+async function monitorStopLoop() {
+  console.log("[SAMPLE SL MONITOR] started; polling open GOLD position every 1000ms");
+  let lastNoPosition = 0;
+  while (true) {
+    try {
+      const ps = await positions();
+      const p = ps.find(isGoldPosition);
+
+      if (!p) {
+        if (armed && !stopTriggered) {
+          console.log("[SAMPLE SL MONITOR] GOLD position no longer open");
+          armed = false;
+        }
+        if (Date.now() - lastNoPosition > 10000) {
+          console.log("[SAMPLE SL MONITOR] no open GOLD position");
+          lastNoPosition = Date.now();
+        }
+        await new Promise(r => setTimeout(r, 1000));
+        continue;
+      }
+
+      const pid = pick(p, ["position_id", "positionId", "id"]);
+      const liveEntry = entryPrice(p);
+      const mark = positionMarkPrice(p);
+
+      if (!armed || positionId !== pid) {
+        positionId = pid;
+        entry = liveEntry || entry;
+        armed = true;
+        stopTriggered = false;
+        console.log(`[SAMPLE SL MONITOR] position=${pid} entry=${entry} stop=${entry - slDistance}`);
+      }
+
+      if (mark > 0) {
+        const stop = entry - slDistance;
+        console.log(`[SAMPLE SL MONITOR] mark=${mark} stop=${stop}`);
+        if (mark <= stop) await closeForStop(mark);
+      } else {
+        console.log("[SAMPLE SL MONITOR] position has no mark/current price field");
+      }
+
+      await new Promise(r => setTimeout(r, 1000));
+    } catch (e) {
+      console.error("[SAMPLE SL MONITOR ERROR] " + (e?.message || e));
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+}
+
 if (!Number.isFinite(slDistance) || slDistance <= 0) {
   throw new Error("Invalid SL_DISTANCE; expected positive price distance");
 }
 
-console.log(`[SAMPLE BOT] market=${market} qty=0.001 IMMEDIATE_BUY=true SL_DISTANCE=${slDistance}`);
+console.log(`[SAMPLE BOT] market=${market} qty=${qty} IMMEDIATE_BUY=true SL_DISTANCE=${slDistance}`);
 console.log(`[SAMPLE BOT] LIVE_TRADING=${live} DRY_RUN_ONLY=${dry} USER_LIVE_CONFIRMATION=${liveConfirm} EXECUTION_ENABLED=${executionEnabled}`);
 
 await account();
 console.log("[SAMPLE AUTH] authenticated; account ready");
+monitorStopLoop().catch(e => console.error("[SAMPLE SL MONITOR FATAL] " + (e?.message || e)));
 
 const mi = unwrap(await client.getMarket({ market_id: market }));
 console.log("[SAMPLE MARKET META] " + JSON.stringify(mi).slice(0,4000));
@@ -237,7 +272,9 @@ while (true) {
     const stream = new PriceStream({ symbols: [streamSymbol] });
     console.log("[SAMPLE STREAM] GOLD connected");
 
+    let receivedTicks = 0;
     for await (const tick of stream) {
+      receivedTicks++;
       const price = extractPrice(tick);
       const ts0 = extractTimestamp(tick) || Date.now();
       if (!Number.isFinite(price) || price <= 0) {
@@ -263,6 +300,7 @@ while (true) {
 
       if (armed) await closeForStop(price);
     }
+    console.log(`[SAMPLE STREAM] iterator ended; receivedTicks=${receivedTicks}; reconnecting`);
   } catch (err) {
     console.error("[SAMPLE STREAM ERROR] " + (err?.message || err) + "; reconnecting in 3000ms");
     await new Promise(r => setTimeout(r, 3000));
