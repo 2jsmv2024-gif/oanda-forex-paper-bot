@@ -4,14 +4,12 @@ const key = (process.env.MFP_API_KEY || "").trim();
 const market = process.env.MFP_MARKET_ID || "hyperliquid|xyz:GOLD";
 const qty = 0.001;
 const leverage = +(process.env.MFP_LEVERAGE || "5");
+const offset = +(process.env.TEST_PRICE_OFFSET || "1");
 
 const live = (process.env.LIVE_TRADING || "false").toLowerCase() === "true";
 const dry = (process.env.DRY_RUN_ONLY || "true").toLowerCase() === "true";
 const liveConfirm = (process.env.MFP_USER_LIVE_CONFIRMATION || "").trim() === "YES";
 const executionEnabled = live && !dry && liveConfirm;
-
-const buyAbove = +(process.env.BUY_ABOVE_PRICE || "0");
-const sellBelow = +(process.env.SELL_BELOW_PRICE || "0");
 
 const client = new MyFundedPerps({ apiKey: key });
 let accountId = (process.env.MFP_ACCOUNT_ID || "").trim();
@@ -32,7 +30,7 @@ async function account() {
 }
 
 async function sendOrder(side, price) {
-  console.log(`[SAMPLE SIGNAL] ${side} qty=0.001 price=${price}`);
+  console.log(`[SAMPLE SIGNAL] ${side} qty=0.001 triggerPrice=${price}`);
 
   if (!executionEnabled) {
     console.log(`[SAMPLE DRY] order NOT submitted executionEnabled=${executionEnabled}`);
@@ -49,19 +47,16 @@ async function sendOrder(side, price) {
     margin_mode: "cross"
   });
 
-  console.log(`[SAMPLE ORDER ACCEPTED] ${side} qty=0.001 price=${price}`);
+  console.log(`[SAMPLE ORDER ACCEPTED] ${side} qty=0.001 triggerPrice=${price}`);
   console.log(JSON.stringify(unwrap(result)));
 }
 
 if (!key) throw new Error("MFP_API_KEY missing");
-if (!Number.isFinite(buyAbove) || !Number.isFinite(sellBelow)) {
-  throw new Error("BUY_ABOVE_PRICE and SELL_BELOW_PRICE must be valid numbers");
-}
-if (buyAbove <= sellBelow) {
-  throw new Error("BUY_ABOVE_PRICE must be greater than SELL_BELOW_PRICE");
+if (!Number.isFinite(offset) || offset <= 0) {
+  throw new Error("TEST_PRICE_OFFSET must be a positive number");
 }
 
-console.log(`[SAMPLE BOT] market=${market} qty=0.001 buyAbove=${buyAbove} sellBelow=${sellBelow}`);
+console.log(`[SAMPLE BOT] market=${market} qty=0.001 offset=±${offset}`);
 console.log(`[SAMPLE BOT] LIVE_TRADING=${live} DRY_RUN_ONLY=${dry} USER_LIVE_CONFIRMATION=${liveConfirm} EXECUTION_ENABLED=${executionEnabled}`);
 
 await account();
@@ -75,6 +70,9 @@ console.log("[SAMPLE MARKET] stream symbol=" + streamSymbol);
 let buyDone = false;
 let sellDone = false;
 let previous = null;
+let reference = null;
+let buyAbove = null;
+let sellBelow = null;
 
 while (true) {
   try {
@@ -84,6 +82,13 @@ while (true) {
     for await (const tick of stream) {
       const price = +pick(tick, ["price", "mid", "mark"]);
       if (!Number.isFinite(price)) continue;
+
+      if (reference == null) {
+        reference = price;
+        buyAbove = reference + offset;
+        sellBelow = reference - offset;
+        console.log(`[SAMPLE LEVELS] reference=${reference} BUY_ABOVE=${buyAbove} SELL_BELOW=${sellBelow}`);
+      }
 
       if (previous != null) {
         if (!buyDone && previous < buyAbove && price >= buyAbove) {
@@ -98,7 +103,6 @@ while (true) {
       }
 
       previous = price;
-      console.log(`[SAMPLE PRICE] ${price}`);
     }
   } catch (err) {
     console.error("[SAMPLE STREAM ERROR] " + (err?.message || err) + "; reconnecting in 3000ms");
