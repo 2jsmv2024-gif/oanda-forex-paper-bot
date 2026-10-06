@@ -666,6 +666,162 @@ def latest_entry_signal(raw, engine, tf, session_name):
     }
 
 # ============================================================
+# LIVE MFP BRIDGE
+# Frozen MFP portfolio rules; V2 mechanics remain unchanged.
+# XAUUSD-only, with MFP trade IDs isolated from the other 8 engines.
+# ============================================================
+MFP_LIVE_ENABLED = os.getenv("MFP_LIVE_ENABLED", "true").strip().lower() == "true"
+MFP_OANDA_UNITS = float(os.getenv("MFP_OANDA_UNITS", "1"))
+MFP_SYSTEMS = {
+    "S1": {11: "T1", 7: "T2", 13: "T3"},
+    "S2": {15: "T1", 14: "T2", 13: "T3"},
+    "S3": {15: "T1", 13: "T2", 14: "T3"},
+}
+
+def _mfp_allowed_second(first_priority, incoming_priority):
+    if first_priority == "T1":
+        return incoming_priority in ("T2", "T3")
+    if first_priority in ("T2", "T3"):
+        return incoming_priority == "T1"
+    return False
+
+def _mfp_close_trade(s, account_id, trade_id, reason):
+    if not trade_id:
+        return None
+    if not LIVE_TRADING_ENABLED:
+        print(f"[MFP DRY-RUN CLOSE] trade={trade_id} reason={reason}", flush=True)
+        return {"dry_run": True}
+    _wait_for_order_slot()
+    r = s.put(f"{REST_URL}/v3/accounts/{account_id}/trades/{trade_id}/close",
+              json={"units": "ALL"}, timeout=20)
+    if not r.ok:
+        print(f"[MFP CLOSE REJECTED] HTTP {r.status_code} trade={trade_id} body={_safe_order_error_body(r)}", flush=True)
+        return None
+    data = r.json()
+    print("[MFP TRADE CLOSED]", json.dumps(data), flush=True)
+    return data
+
+def _mfp_open_trade(s, account_id, side, session, priority, entry_time):
+    if MFP_OANDA_UNITS <= 0:
+        print("[MFP ORDER BLOCKED] MFP_OANDA_UNITS must be > 0", flush=True)
+        return None
+    signed = MFP_OANDA_UNITS if side == "BUY" else -MFP_OANDA_UNITS
+    payload = {"order": {
+        "type": "MARKET", "instrument": MARKETS["XAUUSD"], "units": str(signed),
+        "timeInForce": "FOK", "positionFill": "DEFAULT",
+        "clientExtensions": {"tag": f"MFP_{session}_{priority}"[:20],
+                             "comment": "Frozen MFP live bridge"},
+    }}
+    if not LIVE_TRADING_ENABLED:
+        print(f"[MFP DRY-RUN ORDER] XAUUSD {side} units={MFP_OANDA_UNITS} {session} {priority} entry={entry_time}", flush=True)
+        return {"dry_run": True, "trade_id": None}
+    last_error = None
+    for attempt in range(1, ORDER_MAX_RETRIES + 1):
+        _wait_for_order_slot()
+        try:
+            r = s.post(f"{REST_URL}/v3/accounts/{account_id}/orders", json=payload, timeout=20)
+        except requests.RequestException as e:
+            print(f"[MFP ORDER TRANSPORT ERROR] {e}", flush=True)
+            return None
+        if r.ok:
+            data = r.json()
+            fill = data.get("orderFillTransaction", {})
+            trade_id = (fill.get("tradeOpened") or {}).get("tradeID")
+            print("[MFP ORDER ACCEPTED]", json.dumps(data), flush=True)
+            print(f"[MFP ORDER_FILL] trade_id={trade_id} session={session} priority={priority} side={side}", flush=True)
+            return {"trade_id": trade_id, "response": data}
+        body = _safe_order_error_body(r)
+        if r.status_code == 429 or 500 <= r.status_code <= 599:
+            retry_after = r.headers.get("Retry-After", "")
+            try:
+                wait = float(retry_after)
+            except (TypeError, ValueError):
+                wait = ORDER_BACKOFF_BASE_SEC * (2 ** (attempt - 1))
+            wait = min(max(wait, ORDER_MIN_INTERVAL_SEC), 30.0)
+            last_error = RuntimeError(f"HTTP {r.status_code}: {body}")
+            print(f"[MFP ORDER RETRY] HTTP {r.status_code} attempt={attempt}/{ORDER_MAX_RETRIES} wait={wait:.2f}s body={body}", flush=True)
+            if attempt < ORDER_MAX_RETRIES:
+                time.sleep(wait)
+                continue
+            break
+        print(f"[MFP ORDER REJECTED] HTTP {r.status_code} body={body}", flush=True)
+        last_error = RuntimeError(f"HTTP {r.status_code}: {body}")
+        break
+    print(f"[MFP ORDER FAILED] {last_error}", flush=True)
+    return None
+
+def _mfp_candidate(raw, tf, session, bucket_start):
+    prepared = prepare_v2(raw, tf, session)
+    if len(prepared) < 3:
+        return None
+    completed = prepared[pd.to_datetime(prepared["datetime"], utc=True) < pd.Timestamp(bucket_start)].reset_index(drop=True)
+    if len(completed) < 3:
+        return None
+    trades = run_frozen_mechanics(completed)
+    candidates = trades[trades["reason"].astype(str) != "END_OF_DATA"] if not trades.empty else pd.DataFrame()
+    return candidates.iloc[-1] if not candidates.empty else None
+
+def process_live_mfp(state, closed_m1, boundary_ts, s, account_id):
+    if not MFP_LIVE_ENABLED or not MFP_FROZEN_ENABLED or state.raw.empty:
+        return
+    session_full = current_session_name(closed_m1["datetime"])
+    if session_full is None:
+        return
+    session = session_full.split("_", 1)[0]
+    bucket_start = pd.Timestamp(boundary_ts)
+    for tf, priority in MFP_SYSTEMS[session].items():
+        if not tf_bucket_closed(bucket_start, tf):
+            continue
+        key = ("MFP", session, tf)
+        candidate = _mfp_candidate(state.raw, tf, session_full, bucket_start)
+        if candidate is None:
+            continue
+        entry_time = pd.Timestamp(candidate["entry_time"])
+        side = str(candidate["side"]).upper()
+        sig = (entry_time, side, priority)
+        if state.mfp_last_signature.get(key) == sig:
+            continue
+        state.mfp_last_signature[key] = sig
+        slots = state.mfp_slots[session]
+        survivors = []
+        for slot in slots:
+            if pd.Timestamp(slot["candidate_exit_time"]) <= entry_time:
+                _mfp_close_trade(s, account_id, slot.get("trade_id"), "NORMAL_EXIT")
+            else:
+                survivors.append(slot)
+        slots[:] = survivors
+
+        if slots and any(slot["side"] != side for slot in slots):
+            if priority == "T3":
+                print(f"[MFP REJECTED] XAUUSD {session} {priority} {side} reason=OPPOSITE_T3_REJECTED", flush=True)
+                continue
+            print(f"[MFP REVERSAL] XAUUSD {session} {priority} {side} closing {len(slots)} MFP slot(s)", flush=True)
+            for slot in list(slots):
+                _mfp_close_trade(s, account_id, slot.get("trade_id"), "OPPOSITE_T1_T2_REVERSAL")
+            slots.clear()
+
+        if not slots:
+            result = _mfp_open_trade(s, account_id, side, session, priority, entry_time)
+            if result is not None:
+                slots.append({"priority": priority, "side": side, "entry_time": entry_time,
+                              "candidate_exit_time": candidate["exit_time"], "trade_id": result.get("trade_id")})
+            continue
+
+        if any(slot["priority"] == priority for slot in slots):
+            print(f"[MFP REJECTED] XAUUSD {session} {priority} {side} reason=DUPLICATE_PRIORITY", flush=True)
+            continue
+        if len(slots) >= 2:
+            print(f"[MFP REJECTED] XAUUSD {session} {priority} {side} reason=TWO_SLOTS_FULL", flush=True)
+            continue
+        if _mfp_allowed_second(slots[0]["priority"], priority):
+            result = _mfp_open_trade(s, account_id, side, session, priority, entry_time)
+            if result is not None:
+                slots.append({"priority": priority, "side": side, "entry_time": entry_time,
+                              "candidate_exit_time": candidate["exit_time"], "trade_id": result.get("trade_id")})
+        else:
+            print(f"[MFP REJECTED] XAUUSD {session} {priority} {side} reason=PRIORITY_RULE", flush=True)
+
+# ============================================================
 # LIVE ENGINE STATE
 # ============================================================
 class LiveMarketState:
@@ -673,6 +829,8 @@ class LiveMarketState:
         self.raw = pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
         self.last_processed = {}
         self.last_signature = {}
+        self.mfp_last_signature = {}
+        self.mfp_slots = {"S1": [], "S2": [], "S3": []}
 
     def append(self, candle):
         row = pd.DataFrame([candle])
@@ -792,6 +950,7 @@ def stream_live(s, account_id):
     print("Signal engines:", ", ".join(SIGNAL_ENGINES))
     print("Nine components:", ", ".join(STRATEGY_COMPONENTS))
     print("MFP frozen layer:", "ENABLED" if MFP_FROZEN_ENABLED else "DISABLED")
+    print("MFP live bridge:", "ENABLED" if MFP_LIVE_ENABLED else "DISABLED", "units=", MFP_OANDA_UNITS)
     print("Monitor all:", MONITOR_ALL_LIVE)
     print("Selected execution:", LIVE_EXECUTION_ENGINE, "TF", LIVE_TF, "SESSION", LIVE_SESSION)
     print("Orders:", "ENABLED (PRACTICE)" if LIVE_TRADING_ENABLED else "DRY-RUN")
@@ -867,6 +1026,8 @@ def stream_live(s, account_id):
 
                     # Time protection applies to execution. Data can still be built.
                     process_live_market(market, states[market], closed, bucket, s, account_id)
+                    if market == "XAUUSD":
+                        process_live_mfp(states[market], closed, bucket, s, account_id)
 
         except Exception as e:
             print("[STREAM ERROR]", type(e).__name__, str(e), flush=True)
@@ -1065,7 +1226,7 @@ def main():
     if MASTER_MODE == "LIVE":
         print("[NINE-COMPONENT MODE] All 8 signal engines + frozen MFP layer enabled.", flush=True)
         print("[ALL-ENGINE EXECUTION] Every qualifying signal from all 8 signal engines may place an OANDA order.", flush=True)
-        print("[MFP SAFETY] Frozen MFP remains separate from direct signal execution.", flush=True)
+        print("[MFP LIVE] XAUUSD V2 -> frozen MFP portfolio bridge enabled.", flush=True)
         stream_live(s, account_id)
     elif MASTER_MODE == "DAILY_RESEARCH":
         run_daily_research(s)
