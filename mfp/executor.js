@@ -1,7 +1,9 @@
 import {MyFundedPerps,PriceStream} from "@myfundedperps/sdk";
 const key=(process.env.MFP_API_KEY||"").trim(), market=process.env.MFP_MARKET_ID||"hyperliquid|xyz:GOLD";
 const qty=+(process.env.MFP_BASE_QTY||"0.150"), lev=+(process.env.MFP_LEVERAGE||"5");
-const live=(process.env.LIVE_TRADING||"false").toLowerCase()=="true", dry=(process.env.DRY_RUN_ONLY||"true").toLowerCase()=="true";\nconst liveConfirm=(process.env.MFP_USER_LIVE_CONFIRMATION||"").trim()=="YES";\nconst executionEnabled=live&&!dry&&liveConfirm;
+const live=(process.env.LIVE_TRADING||"false").toLowerCase()=="true", dry=(process.env.DRY_RUN_ONLY||"true").toLowerCase()=="true";
+const liveConfirm=(process.env.MFP_USER_LIVE_CONFIRMATION||"").trim()=="YES";
+const executionEnabled=live&&!dry&&liveConfirm;
 const client=new MyFundedPerps(key); let aid=(process.env.MFP_ACCOUNT_ID||"").trim(), raw=[],cur=null,last=new Map(),slots={S1:[],S2:[],S3:[]},sk=null;
 const SES={S1:["03:15","08:15"],S2:["10:15","14:15"],S3:["16:15","21:15"]};
 const TF={S1:{10:"T1",13:"T2",15:"T3"},S2:{6:"T1",14:"T2",15:"T3"},S3:{14:"T1",10:"T2",15:"T3"}};
