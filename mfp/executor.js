@@ -1,10 +1,12 @@
 import {MyFundedPerps,PriceStream} from "@myfundedperps/sdk";
 const key=(process.env.MFP_API_KEY||"").trim(), market=process.env.MFP_MARKET_ID||"hyperliquid|xyz:GOLD";
-const qty=+(process.env.MFP_BASE_QTY||"0.150"), lev=+(process.env.MFP_LEVERAGE||"5");
+const configuredQty=+(process.env.MFP_BASE_QTY||"0.150"), minQty=+(process.env.MFP_MIN_QTY||"0.003");
+const qty=Math.max(configuredQty,minQty), lev=+(process.env.MFP_LEVERAGE||"5");
 const live=(process.env.LIVE_TRADING||"false").toLowerCase()=="true", dry=(process.env.DRY_RUN_ONLY||"true").toLowerCase()=="true";
 const liveConfirm=(process.env.MFP_USER_LIVE_CONFIRMATION||"").trim()=="YES";
 const executionEnabled=live&&!dry&&liveConfirm;
 const client=new MyFundedPerps({apiKey:key}); let aid=(process.env.MFP_ACCOUNT_ID||"").trim(), raw=[],cur=null,last=new Map(),slots={S1:[],S2:[],S3:[]},sk=null;
+const pending=new Set(), failedSignals=new Set();
 const SES={S1:["03:15","08:15"],S2:["10:15","14:15"],S3:["16:15","21:15"]};
 const TF={S1:{10:"T1",13:"T2",15:"T3"},S2:{6:"T1",14:"T2",15:"T3"},S3:{14:"T1",10:"T2",15:"T3"}};
 const v=(x,a)=>{for(const k of a)if(x?.[k]!=null)return x[k];return null},u=x=>x?.data??x;
@@ -18,19 +20,51 @@ if(b){if(p!="BUY"){p="BUY";e.push({t:c0.ts,s:"BUY",r:"NEW_BUY_SIGNAL"})}r=c1.ha_
 if(p=="BUY"){if(c0.ha_low<r){p="SELL";e.push({t:c0.ts,s:"SELL",r:"REFERENCE_LOW_BREAK"});r=c0.ha_high}else r=c0.ha_low}
 else if(p=="SELL"){if(c0.ha_high>r){p="BUY";e.push({t:c0.ts,s:"BUY",r:"REFERENCE_HIGH_BREAK"});r=c0.ha_low}else r=c0.ha_high}}return e}
 async function account(){if(aid)return aid;let x=u(await client.listAccounts()),a=Array.isArray(x)?x:x?.data||[];aid=v(a[0],["account_id","id","accountId"]);if(!aid)throw Error("MFP account identifier unavailable");return aid}
-async function open(s,pr,side,t){if(!executionEnabled){console.log(`[MFP DRY SIGNAL] ${s} ${pr} ${side} executionEnabled=${executionEnabled}`);return null}let r=await client.createOrder({account_id:await account(),market_id:market,side:side.toLowerCase(),type:"market",size:qty,leverage:lev,margin_mode:"cross"});console.log(`[MFP ORDER ACCEPTED] ${s} ${pr} ${side} ${new Date(t).toISOString()}`);return u(r)}
+async function open(s,pr,side,t){
+if(!executionEnabled){console.log(`[MFP DRY SIGNAL] ${s} ${pr} ${side} executionEnabled=${executionEnabled}`);return null}
+try{
+let r=await client.createOrder({body:{account_id:await account(),market_id:market,side:side.toLowerCase(),type:"market",size:qty,leverage:lev,margin_mode:"cross"}});
+console.log(`[MFP ORDER ACCEPTED] ${s} ${pr} ${side} qty=${qty} ${new Date(t).toISOString()}`);
+return u(r)
+}catch(x){
+console.error(`[MFP ORDER REJECTED] ${s} ${pr} ${side} qty=${qty} reason=${x?.message||x}`);
+return null
+}}
 async function positions(){let x=u(await client.listOpenPositions({account_id:await account()}));return Array.isArray(x)?x:x?.data||[]}
-async function closeSession(s,why){let ps=await positions();for(const z of slots[s]){let p=ps.find(x=>String(v(x,["position_id","id","positionId"]))==String(z.id));if(p&&executionEnabled)await client.closePosition({account_id:await account(),position_id:v(p,["position_id","id","positionId"])});console.log(`[MFP CLOSE] ${s} ${why}`)}slots[s]=[]}
+async function closeSession(s,why){
+let ps=await positions();
+for(const z of slots[s]){
+let p=ps.find(x=>String(v(x,["position_id","id","positionId"]))==String(z.id));
+if(p&&executionEnabled){
+let pid=v(p,["position_id","id","positionId"]),rawSize=v(p,["size","quantity","qty","position_size","positionSize"]),closeSize=Math.abs(+(rawSize||qty));
+let posSide=String(v(p,["side","position_side","positionSide"])||"long").toLowerCase(),closeSide=posSide.includes("short")?"buy":"sell";
+try{
+await client.createOrder({body:{account_id:await account(),market_id:market,side:closeSide,type:"market",size:closeSize,leverage:lev,margin_mode:"cross",reduce_only:true}});
+console.log(`[MFP CLOSE ACCEPTED] ${s} ${why} reduceOnly=${closeSide} qty=${closeSize}`);
+}catch(x){console.error(`[MFP CLOSE REJECTED] ${s} ${why} reason=${x?.message||x}`)}
+}
+console.log(`[MFP CLOSE] ${s} ${why}`)
+}
+slots[s]=[]
+}
 function ok2(a,b){return a=="T1"?(b=="T2"||b=="T3"):a=="T2"?b=="T1":a=="T3"?b=="T1":false}
-async function candidate(s,pr,side,t,r,tf){console.log(`[MFP SIGNAL] ${s} ${pr} ${side} ${r} tf=${tf}`);let a=slots[s],opp=a.some(x=>x.side!=side);
-if(opp){if(pr=="T3"){console.log(`[MFP REJECTED] ${s} opposite-T3`);return}await closeSession(s,"OPPOSITE_T1_T2");let x=await open(s,pr,side,t);if(x)a.push({side,pr,id:v(x,["position_id","id","positionId"])});return}
+async function candidate(s,pr,side,t,r,tf){
+let signalKey=`${s}|${pr}|${t}|${side}|${r}`;
+if(pending.has(signalKey)||failedSignals.has(signalKey))return;
+console.log(`[MFP SIGNAL] ${s} ${pr} ${side} ${r} tf=${tf}`);
+pending.add(signalKey);
+try{
+let a=slots[s],opp=a.some(x=>x.side!=side);
+if(opp){if(pr=="T3"){console.log(`[MFP REJECTED] ${s} opposite-T3`);return}await closeSession(s,"OPPOSITE_T1_T2");let x=await open(s,pr,side,t);if(x)a.push({side,pr,id:v(x,["position_id","id","positionId"])});else failedSignals.add(signalKey);return}
 if(a.length>=2||a.some(x=>x.pr==pr)||(a.length==1&&!ok2(a[0].pr,pr))){console.log(`[MFP REJECTED] ${s} priority=${pr}`);return}
-let x=await open(s,pr,side,t);if(x)a.push({side,pr,id:v(x,["position_id","id","positionId"])})}
+let x=await open(s,pr,side,t);if(x)a.push({side,pr,id:v(x,["position_id","id","positionId"])});else failedSignals.add(signalKey);
+}finally{pending.delete(signalKey)}
+}
 function minute(c){let ss=sess(c.ts),k=ss?.k||null;if(k!=sk){if(sk)slots[sk.split("|")[1]]=[];sk=k;if(k)console.log("[MFP SESSION] "+k)}
 if(!cur||Math.floor(c.ts/60000)!=Math.floor(cur.ts/60000)){if(cur)raw.push(cur);raw=raw.slice(-2000);cur={...c};if(!ss)return;for(const[tf,pr]of Object.entries(TF[ss.s])){let a=rows(+tf,ss.s);if(a.length<4)continue;let e=events(a).at(-1);if(!e)continue;let kk=ss.s+"|"+tf,sg=e.t+"|"+e.s+"|"+e.r;if(last.get(kk)==sg)continue;last.set(kk,sg);candidate(ss.s,pr,e.s,e.t,e.r,+tf).catch(x=>console.error("[MFP EXEC ERROR]",x.message))}}
 cur.high=Math.max(cur.high,c.high);cur.low=Math.min(cur.low,c.low);cur.close=c.close}
 if(!key)throw Error("MFP_API_KEY missing");
-console.log(`[MFP EXECUTOR] PRIMARY_ENGINE=57-59 MARKET=${market} LIVE_TRADING=${live} DRY_RUN_ONLY=${dry} USER_LIVE_CONFIRMATION=${liveConfirm} EXECUTION_ENABLED=${executionEnabled}`);
+console.log(`[MFP EXECUTOR] PRIMARY_ENGINE=57-59 MARKET=${market} CONFIGURED_QTY=${configuredQty} EXEC_QTY=${qty} MIN_QTY=${minQty} LIVE_TRADING=${live} DRY_RUN_ONLY=${dry} USER_LIVE_CONFIRMATION=${liveConfirm} EXECUTION_ENABLED=${executionEnabled}`);
 await account();console.log("[MFP AUTH] authenticated; account ready");
 const mi=u(await client.getMarket({market_id:market})); const streamSymbol=v(mi,["symbol","stream_symbol","market_symbol","ticker","name"]); if(!streamSymbol) throw Error("MFP stream symbol unavailable"); console.log("[MFP MARKET] stream symbol="+streamSymbol);
 async function streamLoop(streamSymbol){
