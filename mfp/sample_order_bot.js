@@ -23,9 +23,23 @@ const pick = (x, keys) => {
 };
 
 async function account() {
-  if (accountId) return accountId;
+  // Resolve the actual authenticated account every time. This prevents a
+  // stale Railway MFP_ACCOUNT_ID reference from breaking order/position calls.
   const x = unwrap(await client.listAccounts());
   const a = Array.isArray(x) ? x : x?.data || [];
+  const configured = (process.env.MFP_ACCOUNT_ID || "").trim();
+
+  if (configured) {
+    const match = a.find(p =>
+      String(pick(p, ["account_id", "id", "accountId"]) || "") === configured
+    );
+    if (match) {
+      accountId = pick(match, ["account_id", "id", "accountId"]);
+      return accountId;
+    }
+    console.warn("[SAMPLE ACCOUNT] configured MFP_ACCOUNT_ID not found; using first authenticated account");
+  }
+
   accountId = pick(a[0], ["account_id", "id", "accountId"]);
   if (!accountId) throw new Error("MFP account identifier unavailable");
   return accountId;
