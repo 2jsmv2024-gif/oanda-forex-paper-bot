@@ -32,6 +32,10 @@ const liveConfirm = (process.env.MFP_USER_LIVE_CONFIRMATION || "").trim() === "Y
 const executionEnabled = live && !dry && liveConfirm;
 
 const client = new MyFundedPerps({ apiKey: key });
+console.log("[SDK PROBE] MyFundedPerps methods=" + Object.getOwnPropertyNames(MyFundedPerps.prototype).join(","));
+console.log("[SDK PROBE] createOrder=" + String(MyFundedPerps.prototype.createOrder).slice(0,5000));
+console.log("[SDK PROBE] PriceStream prototype=" + Object.getOwnPropertyNames(PriceStream.prototype).join(","));
+console.log("[SDK PROBE] PriceStream source=" + String(PriceStream).slice(0,8000));
 let accountId = (process.env.MFP_ACCOUNT_ID || "").trim();
 
 const unwrap = x => x?.data ?? x;
