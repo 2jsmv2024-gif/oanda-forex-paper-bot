@@ -32,6 +32,10 @@ const liveConfirm = (process.env.MFP_USER_LIVE_CONFIRMATION || "").trim() === "Y
 const executionEnabled = live && !dry && liveConfirm;
 
 const client = new MyFundedPerps({ apiKey: key });
+let rp = MyFundedPerps.prototype, reqFn = null, reqOwner = null;
+while (rp && !reqFn) { if (typeof rp.request === "function") { reqFn = rp.request; reqOwner = rp; break; } rp = Object.getPrototypeOf(rp); }
+console.log("[SDK PROBE] requestOwner=" + (reqOwner?.constructor?.name || "none") + " requestFn=" + (reqFn ? "yes" : "no"));
+if (reqFn) { const s=String(reqFn); for (const needle of ["fetch(","headers","Content-Type","content-type","JSON.stringify","body","application/json"]) { const i=s.indexOf(needle); if(i>=0) console.log("[SDK PROBE] request " + needle + " @" + i + " " + s.slice(Math.max(0,i-500),Math.min(s.length,i+1400))); } }
 let cp = MyFundedPerps.prototype, orderFn = null, owner = null;
 while (cp && !orderFn) { if (typeof cp.createOrder === "function") { orderFn = cp.createOrder; owner = cp; break; } cp = Object.getPrototypeOf(cp); }
 console.log("[SDK PROBE] orderOwner=" + (owner?.constructor?.name || "none") + " orderFn=" + (orderFn ? "yes" : "no"));
