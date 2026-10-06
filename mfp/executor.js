@@ -4,7 +4,7 @@ const qty=+(process.env.MFP_BASE_QTY||"0.150"), lev=+(process.env.MFP_LEVERAGE||
 const live=(process.env.LIVE_TRADING||"false").toLowerCase()=="true", dry=(process.env.DRY_RUN_ONLY||"true").toLowerCase()=="true";
 const liveConfirm=(process.env.MFP_USER_LIVE_CONFIRMATION||"").trim()=="YES";
 const executionEnabled=live&&!dry&&liveConfirm;
-const client=new MyFundedPerps(key); let aid=(process.env.MFP_ACCOUNT_ID||"").trim(), raw=[],cur=null,last=new Map(),slots={S1:[],S2:[],S3:[]},sk=null;
+const client=new MyFundedPerps({apiKey:key}); let aid=(process.env.MFP_ACCOUNT_ID||"").trim(), raw=[],cur=null,last=new Map(),slots={S1:[],S2:[],S3:[]},sk=null;
 const SES={S1:["03:15","08:15"],S2:["10:15","14:15"],S3:["16:15","21:15"]};
 const TF={S1:{10:"T1",13:"T2",15:"T3"},S2:{6:"T1",14:"T2",15:"T3"},S3:{14:"T1",10:"T2",15:"T3"}};
 const v=(x,a)=>{for(const k of a)if(x?.[k]!=null)return x[k];return null},u=x=>x?.data??x;
