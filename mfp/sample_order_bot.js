@@ -150,7 +150,7 @@ async function sendImmediateBuy(currentPrice) {
     margin_mode: "cross"
   }}));
   } catch (e) {
-    console.error("[SAMPLE ORDER ERROR] message=" + (e?.message || e) + " keys=" + Object.keys(e || {}).join(",") + " status=" + (e?.status ?? "") + " body=" + JSON.stringify(e?.body ?? e?.data ?? null));
+    console.error("[SAMPLE ORDER ERROR] message=" + (e?.message || e) + " keys=" + Object.keys(e || {}).join(",") + " status=" + (e?.status ?? "") + " details=" + JSON.stringify(e?.details ?? null) + " body=" + JSON.stringify(e?.body ?? e?.data ?? null));
     throw e;
   }
 
