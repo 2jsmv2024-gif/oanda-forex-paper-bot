@@ -39,6 +39,9 @@ if (reqFn) { const s=String(reqFn); for (const needle of ["fetch(","headers","Co
 let cp = MyFundedPerps.prototype, orderFn = null, owner = null;
 while (cp && !orderFn) { if (typeof cp.createOrder === "function") { orderFn = cp.createOrder; owner = cp; break; } cp = Object.getPrototypeOf(cp); }
 console.log("[SDK PROBE] orderOwner=" + (owner?.constructor?.name || "none") + " orderFn=" + (orderFn ? "yes" : "no"));
+let closeFn = null, closeOwner = null; cp = MyFundedPerps.prototype;
+while (cp && !closeFn) { if (typeof cp.closePosition === "function") { closeFn = cp.closePosition; closeOwner = cp; break; } cp = Object.getPrototypeOf(cp); }
+if (closeFn) console.log("[SDK PROBE] closePosition=" + String(closeFn));
 if (orderFn) { const s = String(orderFn); for (const needle of ["fetch(","fetch (","application/json","body","POST","/orders"]) { const i=s.indexOf(needle); if(i>=0) console.log("[SDK PROBE] createOrder " + needle + " @" + i + " " + s.slice(Math.max(0,i-500),Math.min(s.length,i+1200))); } }
 const ps = String(PriceStream), wi = ps.indexOf("wss://");
 console.log("[SDK PROBE] PriceStream wss=" + (wi>=0 ? ps.slice(Math.max(0,wi-600),Math.min(ps.length,wi+1800)) : "not-found"));
