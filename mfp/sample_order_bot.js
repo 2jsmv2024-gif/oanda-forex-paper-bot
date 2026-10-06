@@ -49,6 +49,7 @@ async function account() {
   // stale Railway MFP_ACCOUNT_ID reference from breaking order/position calls.
   const x = unwrap(await client.listAccounts());
   const a = Array.isArray(x) ? x : x?.data || [];
+  if (!accountId) console.log("[SAMPLE ACCOUNTS] " + JSON.stringify(a).slice(0,6000));
   const configured = (process.env.MFP_ACCOUNT_ID || "").trim();
 
   if (configured) {
@@ -137,7 +138,9 @@ async function sendImmediateBuy(currentPrice) {
     return;
   }
 
-  const result = unwrap(await client.createOrder({ body: {
+  let result;
+  try {
+    result = unwrap(await client.createOrder({ body: {
     account_id: await account(),
     market_id: market,
     side: "buy",
@@ -146,6 +149,10 @@ async function sendImmediateBuy(currentPrice) {
     leverage,
     margin_mode: "cross"
   }}));
+  } catch (e) {
+    console.error("[SAMPLE ORDER ERROR] message=" + (e?.message || e) + " keys=" + Object.keys(e || {}).join(",") + " status=" + (e?.status ?? "") + " body=" + JSON.stringify(e?.body ?? e?.data ?? null));
+    throw e;
+  }
 
   console.log("[SAMPLE ORDER ACCEPTED] BUY qty=0.001");
   console.log(JSON.stringify(result));
