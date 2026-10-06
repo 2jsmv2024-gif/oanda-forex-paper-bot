@@ -32,11 +32,12 @@ const liveConfirm = (process.env.MFP_USER_LIVE_CONFIRMATION || "").trim() === "Y
 const executionEnabled = live && !dry && liveConfirm;
 
 const client = new MyFundedPerps({ apiKey: key });
-const co = String(MyFundedPerps.prototype.createOrder);
-console.log("[SDK PROBE] methods=" + Object.getOwnPropertyNames(MyFundedPerps.prototype).join(","));
-for (const needle of ["fetch(","fetch (","Content-Type","application/json","body:","body","POST","/orders"]) { const i=co.indexOf(needle); if(i>=0) console.log("[SDK PROBE] createOrder " + needle + " @" + i + "\n" + co.slice(Math.max(0,i-900),Math.min(co.length,i+1800))); }
-const ps = String(PriceStream);
-for (const needle of ["WebSocket","subscribe","symbols","url","wss://"]) { const i=ps.indexOf(needle); if(i>=0) console.log("[SDK PROBE] PriceStream " + needle + " @" + i + "\n" + ps.slice(Math.max(0,i-900),Math.min(ps.length,i+1800))); }
+let cp = MyFundedPerps.prototype, orderFn = null, owner = null;
+while (cp && !orderFn) { if (typeof cp.createOrder === "function") { orderFn = cp.createOrder; owner = cp; break; } cp = Object.getPrototypeOf(cp); }
+console.log("[SDK PROBE] orderOwner=" + (owner?.constructor?.name || "none") + " orderFn=" + (orderFn ? "yes" : "no"));
+if (orderFn) { const s = String(orderFn); for (const needle of ["fetch(","fetch (","application/json","body","POST","/orders"]) { const i=s.indexOf(needle); if(i>=0) console.log("[SDK PROBE] createOrder " + needle + " @" + i + " " + s.slice(Math.max(0,i-500),Math.min(s.length,i+1200))); } }
+const ps = String(PriceStream), wi = ps.indexOf("wss://");
+console.log("[SDK PROBE] PriceStream wss=" + (wi>=0 ? ps.slice(Math.max(0,wi-600),Math.min(ps.length,wi+1800)) : "not-found"));
 let accountId = (process.env.MFP_ACCOUNT_ID || "").trim();
 
 const unwrap = x => x?.data ?? x;
