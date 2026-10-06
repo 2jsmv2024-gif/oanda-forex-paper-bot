@@ -238,6 +238,10 @@ async function monitorStopLoop() {
           console.log("[SAMPLE SL MONITOR] no open GOLD position");
           lastNoPosition = Date.now();
         }
+        if (entriesDisabledByCutoff()) {
+          console.log(`[SAMPLE CUTOFF] no open position; exiting cleanly after ${cutoffIst} IST`);
+          process.exit(0);
+        }
         await new Promise(r => setTimeout(r, 1000));
         continue;
       }
