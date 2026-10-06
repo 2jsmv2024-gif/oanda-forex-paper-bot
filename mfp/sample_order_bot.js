@@ -7,6 +7,11 @@ const leverage = +(process.env.MFP_LEVERAGE || "5");
 
 // 100 GOLD pips = $1.00 under our current test convention.
 const slDistance = +(process.env.SL_DISTANCE || "1.0");
+const fixedSlPriceRaw = (process.env.FIXED_SL_PRICE || "").trim();
+const fixedSlPrice = fixedSlPriceRaw ? +fixedSlPriceRaw : 0;
+function activeStop() {
+  return fixedSlPrice > 0 ? fixedSlPrice : (activeStop());
+}
 
 const live = (process.env.LIVE_TRADING || "false").toLowerCase() === "true";
 const dry = (process.env.DRY_RUN_ONLY || "true").toLowerCase() === "true";
@@ -161,7 +166,7 @@ async function sendImmediateBuy(currentPrice) {
   entry = entryPrice(result) || currentPrice;
   armed = true;
 
-  const sl = entry - slDistance;
+  const sl = activeStop();
   console.log(`[SAMPLE SL] entry=${entry} stop=${sl} distance=${slDistance}`);
 
   // If the order response does not include a position id/entry,
@@ -173,7 +178,7 @@ async function sendImmediateBuy(currentPrice) {
       positionId = pick(p, ["position_id", "positionId", "id"]) || positionId;
       entry = entryPrice(p) || entry;
       console.log(`[SAMPLE POSITION] id=${positionId} entry=${entry}`);
-      console.log(`[SAMPLE SL] active stop=${entry - slDistance}`);
+      console.log(`[SAMPLE SL] active stop=${activeStop()}`);
     }
   } catch (e) {
     console.error("[SAMPLE POSITION LOOKUP ERROR] " + (e?.message || e));
@@ -183,7 +188,7 @@ async function sendImmediateBuy(currentPrice) {
 async function closeForStop(currentPrice) {
   if (stopTriggered || !armed || entry == null) return;
 
-  const stop = entry - slDistance;
+  const stop = activeStop();
   if (currentPrice > stop) return;
 
   stopTriggered = true;
@@ -255,11 +260,11 @@ async function monitorStopLoop() {
         entry = liveEntry || entry;
         armed = true;
         stopTriggered = false;
-        console.log(`[SAMPLE SL MONITOR] position=${pid} entry=${entry} stop=${entry - slDistance}`);
+        console.log(`[SAMPLE SL MONITOR] position=${pid} entry=${entry} stop=${activeStop()}`);
       }
 
       if (mark > 0) {
-        const stop = entry - slDistance;
+        const stop = activeStop();
         console.log(`[SAMPLE SL MONITOR] mark=${mark} stop=${stop}`);
         if (mark <= stop) await closeForStop(mark);
       } else {
@@ -274,11 +279,11 @@ async function monitorStopLoop() {
   }
 }
 
-if (!Number.isFinite(slDistance) || slDistance <= 0) {
+if (fixedSlPrice <= 0 && (!Number.isFinite(slDistance) || slDistance <= 0)) {
   throw new Error("Invalid SL_DISTANCE; expected positive price distance");
 }
 
-console.log(`[SAMPLE BOT] market=${market} qty=${qty} IMMEDIATE_BUY=true SL_DISTANCE=${slDistance} CUTOFF_IST=${cutoffIst}`);
+console.log(`[SAMPLE BOT] market=${market} qty=${qty} IMMEDIATE_BUY=true SL_DISTANCE=${slDistance} FIXED_SL_PRICE=${fixedSlPrice || "none"} CUTOFF_IST=${cutoffIst}`);
 console.log(`[SAMPLE BOT] LIVE_TRADING=${live} DRY_RUN_ONLY=${dry} USER_LIVE_CONFIRMATION=${liveConfirm} EXECUTION_ENABLED=${executionEnabled}`);
 
 await account();
@@ -316,7 +321,7 @@ while (true) {
           positionId = pick(existing, ["position_id", "positionId", "id"]);
           entry = entryPrice(existing) || price;
           armed = true;
-          console.log(`[SAMPLE EXISTING POSITION] id=${positionId} entry=${entry} stop=${entry - slDistance}`);
+          console.log(`[SAMPLE EXISTING POSITION] id=${positionId} entry=${entry} stop=${activeStop()}`);
         } else if (entriesDisabledByCutoff()) {
           console.log(`[SAMPLE CUTOFF] ${cutoffIst} IST reached; no new BUY will be submitted`);
           // No new entry after cutoff. Keep the process alive only for monitoring/recovery.
