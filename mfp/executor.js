@@ -30,6 +30,7 @@ cur.high=Math.max(cur.high,c.high);cur.low=Math.min(cur.low,c.low);cur.close=c.c
 if(!key)throw Error("MFP_API_KEY missing");
 console.log(`[MFP EXECUTOR] PRIMARY_ENGINE=57-59 MARKET=${market} LIVE_TRADING=${live} DRY_RUN_ONLY=${dry}`);
 await account();console.log("[MFP AUTH] authenticated; account ready");
-const stream=new PriceStream({symbols:[market]});console.log("[MFP STREAM] GOLD connected");
+const mi=u(await client.getMarket({market_id:market})); const streamSymbol=v(mi,["symbol","stream_symbol","market_symbol","ticker","name"]); if(!streamSymbol) throw Error("MFP stream symbol unavailable"); console.log("[MFP MARKET] stream symbol="+streamSymbol);
+const stream=new PriceStream({symbols:[streamSymbol]});console.log("[MFP STREAM] GOLD connected");
 for await(const t of stream){let p=+v(t,["price","mid","mark"]);if(!Number.isFinite(p))continue;let ts=+v(t,["timestamp","time","ts"])||Date.now(),m=Math.floor(ts/60000)*60000;
 if(!cur||cur.ts!=m)minute({ts:m,open:p,high:p,low:p,close:p});else minute({ts:m,open:cur.open,high:Math.max(cur.high,p),low:Math.min(cur.low,p),close:p})}
