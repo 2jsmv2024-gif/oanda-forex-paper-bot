@@ -42,3 +42,4 @@ for await(const t of stream){let p=+v(t,["price","mid","mark"]);if(!Number.isFin
 if(!cur||cur.ts!=m)minute({ts:m,open:p,high:p,low:p,close:p});else minute({ts:m,open:cur.open,high:Math.max(cur.high,p),low:Math.min(cur.low,p),close:p})}
 }catch(x){console.error("[MFP STREAM ERROR] "+(x?.message||x)+"; reconnecting in 3000ms");await new Promise(r=>setTimeout(r,3000));}
 }}
+await streamLoop(streamSymbol);
