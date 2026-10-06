@@ -10,7 +10,7 @@ const slDistance = +(process.env.SL_DISTANCE || "1.0");
 const fixedSlPriceRaw = (process.env.FIXED_SL_PRICE || "").trim();
 const fixedSlPrice = fixedSlPriceRaw ? +fixedSlPriceRaw : 0;
 function activeStop() {
-  return fixedSlPrice > 0 ? fixedSlPrice : (activeStop());
+  return fixedSlPrice > 0 ? fixedSlPrice : (entry - slDistance);
 }
 
 const live = (process.env.LIVE_TRADING || "false").toLowerCase() === "true";
@@ -128,6 +128,8 @@ let armed = false;
 let entry = null;
 let positionId = null;
 let stopTriggered = false;
+let latestMarketPrice = 0;
+let latestMarketPriceAt = 0;
 
 async function sendImmediateBuy(currentPrice) {
   console.log(`[SAMPLE SIGNAL] IMMEDIATE BUY qty=${qty} currentPrice=${currentPrice} SL_DISTANCE=${slDistance}`);
@@ -253,7 +255,7 @@ async function monitorStopLoop() {
 
       const pid = pick(p, ["position_id", "positionId", "id"]);
       const liveEntry = entryPrice(p);
-      const mark = positionMarkPrice(p);
+      const streamPrice = latestMarketPrice;
 
       if (!armed || positionId !== pid) {
         positionId = pid;
@@ -263,12 +265,12 @@ async function monitorStopLoop() {
         console.log(`[SAMPLE SL MONITOR] position=${pid} entry=${entry} stop=${activeStop()}`);
       }
 
-      if (mark > 0) {
+      if (streamPrice > 0) {
         const stop = activeStop();
-        console.log(`[SAMPLE SL MONITOR] mark=${mark} stop=${stop}`);
-        if (mark <= stop) await closeForStop(mark);
+        console.log(`[SAMPLE SL MONITOR] streamPrice=${streamPrice} stop=${stop} ageMs=${Date.now() - latestMarketPriceAt}`);
+        if (streamPrice <= stop) await closeForStop(streamPrice);
       } else {
-        console.log("[SAMPLE SL MONITOR] position has no mark/current price field");
+        console.log("[SAMPLE SL MONITOR] waiting for GOLD PriceStream price");
       }
 
       await new Promise(r => setTimeout(r, 1000));
@@ -307,6 +309,11 @@ while (true) {
       receivedTicks++;
       const price = extractPrice(tick);
       const ts0 = extractTimestamp(tick) || Date.now();
+      if (Number.isFinite(price) && price > 0) {
+        latestMarketPrice = price;
+        latestMarketPriceAt = Date.now();
+      }
+
       if (!Number.isFinite(price) || price <= 0) {
         console.log("[SAMPLE TICK UNPARSED] " + JSON.stringify(tick).slice(0, 2000));
         continue;
