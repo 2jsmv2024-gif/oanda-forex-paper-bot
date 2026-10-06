@@ -20,7 +20,7 @@ const { MyFundedPerps, PriceStream } = await import("@myfundedperps/sdk");
 
 const key = (process.env.MFP_API_KEY || "").trim();
 const market = process.env.MFP_MARKET_ID || "hyperliquid|xyz:GOLD";
-const qty = 0.001;
+const qty = 0.003;
 const leverage = +(process.env.MFP_LEVERAGE || "5");
 
 // 100 GOLD pips = $1.00 under our current test convention.
