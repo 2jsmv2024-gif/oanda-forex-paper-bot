@@ -36,15 +36,6 @@ let rp = MyFundedPerps.prototype, reqFn = null, reqOwner = null;
 while (rp && !reqFn) { if (typeof rp.request === "function") { reqFn = rp.request; reqOwner = rp; break; } rp = Object.getPrototypeOf(rp); }
 console.log("[SDK PROBE] requestOwner=" + (reqOwner?.constructor?.name || "none") + " requestFn=" + (reqFn ? "yes" : "no"));
 if (reqFn) { const s=String(reqFn); for (const needle of ["fetch(","headers","Content-Type","content-type","JSON.stringify","body","application/json"]) { const i=s.indexOf(needle); if(i>=0) console.log("[SDK PROBE] request " + needle + " @" + i + " " + s.slice(Math.max(0,i-500),Math.min(s.length,i+1400))); } }
-let cp = MyFundedPerps.prototype, orderFn = null, owner = null;
-while (cp && !orderFn) { if (typeof cp.createOrder === "function") { orderFn = cp.createOrder; owner = cp; break; } cp = Object.getPrototypeOf(cp); }
-console.log("[SDK PROBE] orderOwner=" + (owner?.constructor?.name || "none") + " orderFn=" + (orderFn ? "yes" : "no"));
-let closeFn = null, closeOwner = null; cp = MyFundedPerps.prototype;
-while (cp && !closeFn) { if (typeof cp.closePosition === "function") { closeFn = cp.closePosition; closeOwner = cp; break; } cp = Object.getPrototypeOf(cp); }
-if (closeFn) console.log("[SDK PROBE] closePosition=" + String(closeFn));
-if (orderFn) { const s = String(orderFn); for (const needle of ["fetch(","fetch (","application/json","body","POST","/orders"]) { const i=s.indexOf(needle); if(i>=0) console.log("[SDK PROBE] createOrder " + needle + " @" + i + " " + s.slice(Math.max(0,i-500),Math.min(s.length,i+1200))); } }
-const ps = String(PriceStream), wi = ps.indexOf("wss://");
-console.log("[SDK PROBE] PriceStream wss=" + (wi>=0 ? ps.slice(Math.max(0,wi-600),Math.min(ps.length,wi+1800)) : "not-found"));
 let accountId = (process.env.MFP_ACCOUNT_ID || "").trim();
 
 const unwrap = x => x?.data ?? x;
@@ -146,7 +137,7 @@ async function sendImmediateBuy(currentPrice) {
     return;
   }
 
-  const result = unwrap(await client.createOrder({
+  const result = unwrap(await client.createOrder({ body: {
     account_id: await account(),
     market_id: market,
     side: "buy",
@@ -154,7 +145,7 @@ async function sendImmediateBuy(currentPrice) {
     size: qty,
     leverage,
     margin_mode: "cross"
-  }));
+  }}));
 
   console.log("[SAMPLE ORDER ACCEPTED] BUY qty=0.001");
   console.log(JSON.stringify(result));
@@ -208,10 +199,10 @@ async function closeForStop(currentPrice) {
   }
 
   const pid = pick(p, ["position_id", "positionId", "id"]);
-  await client.closePosition({
+  await client.closePosition({ body: {
     account_id: await account(),
     position_id: pid
-  });
+  }});
 
   console.log(`[SAMPLE STOP CLOSE ACCEPTED] position=${pid} current=${currentPrice} stop=${stop}`);
 }
@@ -227,8 +218,9 @@ await account();
 console.log("[SAMPLE AUTH] authenticated; account ready");
 
 const mi = unwrap(await client.getMarket({ market_id: market }));
+console.log("[SAMPLE MARKET META] " + JSON.stringify(mi).slice(0,4000));
 const marketUiSymbol = pick(mi, ["symbol", "market_symbol", "ticker", "name"]);
-const streamSymbol = "GOLD-USD";
+const streamSymbol = pick(mi, ["stream_symbol", "streamSymbol", "price_stream_symbol", "priceStreamSymbol"]) || "GOLD-USD";
 if (!marketUiSymbol) throw new Error("MFP market metadata unavailable");
 console.log("[SAMPLE MARKET] API symbol=" + marketUiSymbol + " PriceStream symbol=" + streamSymbol);
 
