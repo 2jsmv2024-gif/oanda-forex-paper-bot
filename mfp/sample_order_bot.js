@@ -5,8 +5,8 @@ const market = process.env.MFP_MARKET_ID || "hyperliquid|xyz:GOLD";
 const qty = 0.001;
 const leverage = +(process.env.MFP_LEVERAGE || "5");
 
-const buyAbove = +(process.env.BUY_ABOVE_PRICE || "4166");
-const sellBelow = +(process.env.SELL_BELOW_PRICE || "4160");
+// 100 GOLD pips = $1.00 under our current test convention.
+const slDistance = +(process.env.SL_DISTANCE || "1.0");
 
 const live = (process.env.LIVE_TRADING || "false").toLowerCase() === "true";
 const dry = (process.env.DRY_RUN_ONLY || "true").toLowerCase() === "true";
@@ -31,33 +31,111 @@ async function account() {
   return accountId;
 }
 
-async function sendOrder(side, price) {
-  console.log(`[SAMPLE SIGNAL] ${side} qty=0.001 triggerPrice=${price}`);
+async function positions() {
+  const x = unwrap(await client.listOpenPositions({ account_id: await account() }));
+  return Array.isArray(x) ? x : x?.data || [];
+}
+
+function isGoldPosition(p) {
+  const m = String(pick(p, ["market_id", "marketId", "market", "symbol", "ticker"]) || "").toUpperCase();
+  return m === String(market).toUpperCase() || m.includes("GOLD");
+}
+
+function entryPrice(p) {
+  return +(pick(p, [
+    "entry_price", "entryPrice", "avg_entry_price", "avgEntryPrice",
+    "average_entry_price", "averageEntryPrice", "price"
+  ]) || 0);
+}
+
+let armed = false;
+let entry = null;
+let positionId = null;
+let stopTriggered = false;
+
+async function sendImmediateBuy(currentPrice) {
+  console.log(`[SAMPLE SIGNAL] IMMEDIATE BUY qty=0.001 currentPrice=${currentPrice} SL_DISTANCE=${slDistance}`);
 
   if (!executionEnabled) {
     console.log(`[SAMPLE DRY] order NOT submitted executionEnabled=${executionEnabled}`);
     return;
   }
 
-  const result = await client.createOrder({
+  const result = unwrap(await client.createOrder({
     account_id: await account(),
     market_id: market,
-    side: side.toLowerCase(),
+    side: "buy",
     type: "market",
     size: qty,
     leverage,
     margin_mode: "cross"
+  }));
+
+  console.log("[SAMPLE ORDER ACCEPTED] BUY qty=0.001");
+  console.log(JSON.stringify(result));
+
+  positionId = pick(result, ["position_id", "positionId", "id"]) || null;
+  entry = entryPrice(result) || currentPrice;
+  armed = true;
+
+  const sl = entry - slDistance;
+  console.log(`[SAMPLE SL] entry=${entry} stop=${sl} distance=${slDistance}`);
+
+  // If the order response does not include a position id/entry,
+  // refresh from the account so the stop monitor is anchored to the actual position.
+  try {
+    const ps = await positions();
+    const p = ps.find(isGoldPosition);
+    if (p) {
+      positionId = pick(p, ["position_id", "positionId", "id"]) || positionId;
+      entry = entryPrice(p) || entry;
+      console.log(`[SAMPLE POSITION] id=${positionId} entry=${entry}`);
+      console.log(`[SAMPLE SL] active stop=${entry - slDistance}`);
+    }
+  } catch (e) {
+    console.error("[SAMPLE POSITION LOOKUP ERROR] " + (e?.message || e));
+  }
+}
+
+async function closeForStop(currentPrice) {
+  if (stopTriggered || !armed || entry == null) return;
+
+  const stop = entry - slDistance;
+  if (currentPrice > stop) return;
+
+  stopTriggered = true;
+  console.log(`[SAMPLE STOP HIT] current=${currentPrice} stop=${stop}`);
+
+  if (!executionEnabled) {
+    console.log(`[SAMPLE DRY] stop close NOT submitted executionEnabled=${executionEnabled}`);
+    return;
+  }
+
+  const ps = await positions();
+  const p = ps.find(x =>
+    (positionId && String(pick(x, ["position_id", "positionId", "id"])) === String(positionId)) ||
+    isGoldPosition(x)
+  );
+
+  if (!p) {
+    console.log("[SAMPLE STOP] no open GOLD position found");
+    return;
+  }
+
+  const pid = pick(p, ["position_id", "positionId", "id"]);
+  await client.closePosition({
+    account_id: await account(),
+    position_id: pid
   });
 
-  console.log(`[SAMPLE ORDER ACCEPTED] ${side} qty=0.001 triggerPrice=${price}`);
-  console.log(JSON.stringify(unwrap(result)));
+  console.log(`[SAMPLE STOP CLOSE ACCEPTED] position=${pid} current=${currentPrice} stop=${stop}`);
 }
 
-if (!Number.isFinite(buyAbove) || !Number.isFinite(sellBelow) || buyAbove <= sellBelow) {
-  throw new Error("Invalid levels: BUY_ABOVE_PRICE must be greater than SELL_BELOW_PRICE");
+if (!Number.isFinite(slDistance) || slDistance <= 0) {
+  throw new Error("Invalid SL_DISTANCE; expected positive price distance");
 }
 
-console.log(`[SAMPLE BOT] market=${market} qty=0.001 BUY_ABOVE=${buyAbove} SELL_BELOW=${sellBelow}`);
+console.log(`[SAMPLE BOT] market=${market} qty=0.001 IMMEDIATE_BUY=true SL_DISTANCE=${slDistance}`);
 console.log(`[SAMPLE BOT] LIVE_TRADING=${live} DRY_RUN_ONLY=${dry} USER_LIVE_CONFIRMATION=${liveConfirm} EXECUTION_ENABLED=${executionEnabled}`);
 
 await account();
@@ -68,10 +146,6 @@ const streamSymbol = pick(mi, ["symbol", "stream_symbol", "market_symbol", "tick
 if (!streamSymbol) throw new Error("MFP stream symbol unavailable");
 console.log("[SAMPLE MARKET] stream symbol=" + streamSymbol);
 
-let buyDone = false;
-let sellDone = false;
-let previous = null;
-
 while (true) {
   try {
     const stream = new PriceStream({ symbols: [streamSymbol] });
@@ -81,19 +155,23 @@ while (true) {
       const price = +pick(tick, ["price", "mid", "mark"]);
       if (!Number.isFinite(price)) continue;
 
-      if (previous != null) {
-        if (!buyDone && previous < buyAbove && price >= buyAbove) {
-          buyDone = true;
-          await sendOrder("BUY", price);
-        }
+      // On startup/reconnect, first recover an existing GOLD position.
+      if (!armed && !stopTriggered) {
+        const ps = await positions();
+        const existing = ps.find(isGoldPosition);
 
-        if (!sellDone && previous > sellBelow && price <= sellBelow) {
-          sellDone = true;
-          await sendOrder("SELL", price);
+        if (existing) {
+          positionId = pick(existing, ["position_id", "positionId", "id"]);
+          entry = entryPrice(existing) || price;
+          armed = true;
+          console.log(`[SAMPLE EXISTING POSITION] id=${positionId} entry=${entry} stop=${entry - slDistance}`);
+        } else {
+          // Immediate market BUY on the first valid live price.
+          await sendImmediateBuy(price);
         }
       }
 
-      previous = price;
+      if (armed) await closeForStop(price);
     }
   } catch (err) {
     console.error("[SAMPLE STREAM ERROR] " + (err?.message || err) + "; reconnecting in 3000ms");
