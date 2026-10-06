@@ -213,12 +213,22 @@ async function closeForStop(currentPrice) {
   }
 
   const pid = pick(p, ["position_id", "positionId", "id"]);
-  await client.closePosition({
-    account_id: await account(),
-    position_id: pid
-  });
-
-  console.log(`[SAMPLE STOP CLOSE ACCEPTED] position=${pid} current=${currentPrice} stop=${stop}`);
+  try {
+    const closeResult = await client.closePosition({
+      account_id: await account(),
+      position_id: pid
+    });
+    console.log(`[SAMPLE STOP CLOSE ACCEPTED] position=${pid} current=${currentPrice} stop=${stop}`);
+    console.log("[SAMPLE STOP CLOSE RESULT] " + JSON.stringify(unwrap(closeResult)));
+  } catch (e) {
+    stopTriggered = false;
+    console.error("[SAMPLE STOP CLOSE ERROR] message=" + (e?.message || e) +
+      " status=" + (e?.status ?? "") +
+      " code=" + String(e?.code ?? "") +
+      " error=" + JSON.stringify(e?.error ?? null) +
+      " details=" + JSON.stringify(e?.details ?? null));
+    throw e;
+  }
 }
 
 function positionMarkPrice(p) {
