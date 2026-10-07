@@ -14,6 +14,8 @@ let aid=(process.env.MFP_ACCOUNT_ID||"").trim();
 let raw=[],cur=null,sk=null;
 const positionsBySystem=new Map();
 const lastSignal=new Map();
+const FILL_CONFIRM_MS=15000;
+const FILL_POLL_MS=500;
 
 const SYSTEMS=[
   {id:"V3-S1-2M",version:"V3",session:"S1",tf:2},
@@ -133,13 +135,57 @@ async function open(sys,side,t){
     console.log(`[MFP DRY SIGNAL] ${sys.id} ${side} executionEnabled=${executionEnabled}`);
     return null;
   }
-  const r=await client.createOrder({body:{
-    account_id:await account(),market_id:market,side:side.toLowerCase(),
-    type:"market",size:qty,leverage:lev,margin_mode:"cross",
-    expected_price:cur?.close||undefined
-  }});
-  console.log(`[MFP ORDER ACCEPTED] ${sys.id} ${side} ${new Date(t).toISOString()}`);
-  return u(r);
+
+  const accountId=await account();
+  const expected=cur?.close||undefined;
+  let r;
+  try{
+    r=await client.createOrder({body:{
+      account_id:accountId,market_id:market,side:side.toLowerCase(),
+      type:"market",size:qty,leverage:lev,margin_mode:"cross",
+      expected_price:expected
+    }});
+  }catch(e){
+    console.error(`[MFP ORDER ERROR] ${sys.id} ${side} message=${e?.message||e} status=${e?.status??""} code=${e?.code??""}`);
+    throw e;
+  }
+
+  const order=u(r);
+  const orderId=v(order,["order_id","orderId","id"]);
+  const orderStatus=v(order,["status","order_status","orderStatus"]);
+  const filled=v(order,["filled_size","filledSize","filled_quantity","filledQuantity","executed_size","executedSize"]);
+  console.log(`[MFP ORDER REQUESTED] ${sys.id} ${side} qty=${qty} expected=${expected??""} orderId=${orderId??""} status=${orderStatus??""} filled=${filled??""}`);
+  console.log("[MFP ORDER RESPONSE] "+JSON.stringify(order).slice(0,5000));
+
+  // createOrder() is only a request acknowledgement. Do not treat it as a
+  // filled position. Confirm the actual account position before arming the
+  // strategy; otherwise one unfilled request can permanently block later
+  // signals for this system.
+  const deadline=Date.now()+FILL_CONFIRM_MS;
+  while(Date.now()<deadline){
+    try{
+      const ps=u(await client.listOpenPositions({account_id:accountId}));
+      const arr=Array.isArray(ps)?ps:ps?.data||[];
+      const p=arr.find(x=>{
+        const m=String(v(x,["market_id","marketId","market","symbol","ticker"])||"").toUpperCase();
+        const pside=String(v(x,["side","position_side","positionSide"])||"").toLowerCase();
+        return (m===String(market).toUpperCase()||m.includes("GOLD")) &&
+          ((side==="BUY"&&pside.includes("long"))||(side==="SELL"&&pside.includes("short")));
+      });
+      if(p){
+        const pid=v(p,["position_id","positionId","id"]);
+        const psize=Math.abs(+(v(p,["size","quantity","qty","position_size","positionSize"])||0));
+        console.log(`[MFP FILL CONFIRMED] ${sys.id} ${side} position=${pid??""} size=${psize} orderId=${orderId??""}`);
+        return {...order,position_id:pid,filled_size:psize};
+      }
+    }catch(e){
+      console.error(`[MFP FILL CHECK ERROR] ${sys.id} ${e?.message||e}`);
+    }
+    await new Promise(r=>setTimeout(r,FILL_POLL_MS));
+  }
+
+  console.warn(`[MFP NOT FILLED] ${sys.id} ${side} qty=${qty} orderId=${orderId??""} afterMs=${FILL_CONFIRM_MS}; no position armed`);
+  return null;
 }
 
 async function closeSystem(sys,side){
