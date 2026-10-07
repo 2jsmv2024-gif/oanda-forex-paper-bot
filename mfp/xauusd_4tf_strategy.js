@@ -1,0 +1,235 @@
+import {MyFundedPerps,PriceStream} from "@myfundedperps/sdk";
+
+const key=(process.env.MFP_API_KEY||"").trim();
+const market=process.env.MFP_MARKET_ID||"hyperliquid|xyz:GOLD";
+const qty=+(process.env.MFP_BASE_QTY||"0.150");
+const lev=+(process.env.MFP_LEVERAGE||"5");
+const live=(process.env.LIVE_TRADING||"false").toLowerCase()==="true";
+const dry=(process.env.DRY_RUN_ONLY||"true").toLowerCase()==="true";
+const liveConfirm=(process.env.MFP_USER_LIVE_CONFIRMATION||"").trim()==="YES";
+const executionEnabled=live&&!dry&&liveConfirm;
+
+const client=new MyFundedPerps({apiKey:key});
+let aid=(process.env.MFP_ACCOUNT_ID||"").trim();
+let raw=[],cur=null,sk=null;
+const positionsBySystem=new Map();
+const lastSignal=new Map();
+
+const SYSTEMS=[
+  {id:"V3-S1-2M",version:"V3",session:"S1",tf:2},
+  {id:"V2-S1-3M",version:"V2",session:"S1",tf:3},
+  {id:"V3-S3-4M",version:"V3",session:"S3",tf:4},
+  {id:"V2-S1-5M",version:"V2",session:"S1",tf:5},
+];
+
+const SES={S1:["03:15","08:15"],S2:["10:15","14:15"],S3:["16:15","21:15"]};
+const v=(x,a)=>{for(const k of a)if(x?.[k]!=null)return x[k];return null};
+const u=x=>x?.data??x;
+
+function ist(t){const d=new Date(t+19800000);return {d:d.toISOString().slice(0,10),m:d.getUTCHours()*60+d.getUTCMinutes()}}
+function sess(t){
+  const p=ist(t);
+  for(const [s,[a,b]] of Object.entries(SES)){
+    const A=a.split(":").map(Number),B=b.split(":").map(Number);
+    if(p.m>=A[0]*60+A[1]&&p.m<B[0]*60+B[1])return{s,k:p.d+"|"+s};
+  }
+}
+
+function agg(tf,sessionName){
+  const by=new Map();
+  for(const r of raw){
+    const ss=sess(r.ts);
+    if(!ss||ss.s!==sessionName)continue;
+    const k=Math.floor(r.ts/60000/tf)*tf;
+    if(!by.has(k))by.set(k,[]);
+    by.get(k).push(r);
+  }
+  return [...by].sort((a,b)=>a[0]-b[0]).map(([,x])=>({
+    ts:x[0].ts,open:x[0].open,high:Math.max(...x.map(r=>r.high)),
+    low:Math.min(...x.map(r=>r.low)),close:x.at(-1).close
+  }));
+}
+
+function aggFull(tf){
+  const by=new Map();
+  for(const r of raw){
+    const k=Math.floor(r.ts/60000/tf)*tf;
+    if(!by.has(k))by.set(k,[]);
+    by.get(k).push(r);
+  }
+  return [...by].sort((a,b)=>a[0]-b[0]).map(([,x])=>({
+    ts:x[0].ts,open:x[0].open,high:Math.max(...x.map(r=>r.high)),
+    low:Math.min(...x.map(r=>r.low)),close:x.at(-1).close
+  }));
+}
+
+function ha(a){
+  const z=[];let o,c;
+  for(const r of a){
+    const hc=(r.open+r.high+r.low+r.close)/4;
+    const ho=o==null?(r.open+r.close)/2:(o+c)/2;
+    z.push({...r,ha_open:ho,ha_close:hc,
+      ha_high:Math.max(r.high,ho,hc),ha_low:Math.min(r.low,ho,hc)});
+    o=ho;c=hc;
+  }
+  return z;
+}
+
+function dataFor(sys){
+  if(sys.version==="V2"){
+    return ha(agg(sys.tf,sys.session));
+  }
+  return ha(aggFull(sys.tf)).filter(x=>sess(x.ts)?.s===sys.session);
+}
+
+function events(a){
+  const e=[];let side=null,reference=null;
+  for(let i=2;i<a.length;i++){
+    const c2=a[i-2],c1=a[i-1],c0=a[i];
+    const buy=c2.ha_close>c2.ha_open&&c1.ha_open<c1.ha_high;
+    const sell=c2.ha_close<c2.ha_open&&c1.ha_open>c1.ha_low;
+
+    if(side==="BUY"&&sell){
+      e.push({t:c0.ts,s:"SELL",r:"OPPOSITE_SIGNAL"});
+      side="SELL";reference=c1.ha_high;continue;
+    }
+    if(side==="SELL"&&buy){
+      e.push({t:c0.ts,s:"BUY",r:"OPPOSITE_SIGNAL"});
+      side="BUY";reference=c1.ha_low;continue;
+    }
+    if(side===null){
+      if(buy){e.push({t:c0.ts,s:"BUY",r:"NEW_BUY_SIGNAL"});side="BUY";reference=c1.ha_low;continue}
+      if(sell){e.push({t:c0.ts,s:"SELL",r:"NEW_SELL_SIGNAL"});side="SELL";reference=c1.ha_high;continue}
+    }
+    if(side==="BUY"){
+      if(c0.ha_low<reference){
+        e.push({t:c0.ts,s:"SELL",r:"REFERENCE_LOW_BREAK"});
+        side="SELL";reference=c0.ha_high;
+      }else reference=c0.ha_low;
+    }else if(side==="SELL"){
+      if(c0.ha_high>reference){
+        e.push({t:c0.ts,s:"BUY",r:"REFERENCE_HIGH_BREAK"});
+        side="BUY";reference=c0.ha_low;
+      }else reference=c0.ha_high;
+    }
+  }
+  return e;
+}
+
+async function account(){
+  const x=u(await client.listAccounts()),a=Array.isArray(x)?x:x?.data||[];
+  if(!a.length)throw Error("MFP authenticated account unavailable");
+  const configured=(process.env.MFP_ACCOUNT_ID||"").trim();
+  const match=configured?a.find(z=>String(v(z,["account_id","id","accountId"]))===configured):null;
+  const chosen=match||a[0];
+  aid=v(chosen,["account_id","id","accountId"]);
+  if(!aid)throw Error("MFP account identifier unavailable");
+  if(configured&&!match)console.log("[MFP ACCOUNT] configured account not returned by API; using authenticated account");
+  return aid;
+}
+
+async function open(sys,side,t){
+  if(!executionEnabled){
+    console.log(`[MFP DRY SIGNAL] ${sys.id} ${side} executionEnabled=${executionEnabled}`);
+    return null;
+  }
+  const r=await client.createOrder({body:{
+    account_id:await account(),market_id:market,side:side.toLowerCase(),
+    type:"market",size:qty,leverage:lev,margin_mode:"cross",
+    expected_price:cur?.close||undefined
+  }});
+  console.log(`[MFP ORDER ACCEPTED] ${sys.id} ${side} ${new Date(t).toISOString()}`);
+  return u(r);
+}
+
+async function closeSystem(sys,side){
+  if(!executionEnabled)return;
+  const ps=u(await client.listOpenPositions({account_id:await account()}));
+  const arr=Array.isArray(ps)?ps:ps?.data||[];
+  for(const p of arr){
+    const pside=String(v(p,["side","position_side","positionSide"])||"").toLowerCase();
+    const closeSide=pside.includes("short")?"buy":"sell";
+    const size=Math.abs(+(v(p,["size","quantity","qty","position_size","positionSize"])||qty));
+    if(!size)continue;
+    await client.createOrder({body:{
+      account_id:await account(),market_id:market,side:closeSide,
+      type:"market",size,leverage:lev,margin_mode:"cross",reduce_only:true
+    }});
+  }
+  positionsBySystem.delete(sys.id);
+  console.log(`[MFP CLOSE] ${sys.id} ${side}`);
+}
+
+async function handle(sys,event){
+  const key=sys.id+"|"+event.t+"|"+event.s+"|"+event.r;
+  if(lastSignal.get(sys.id)===key)return;
+  lastSignal.set(sys.id,key);
+  console.log(`[MFP SIGNAL] ${sys.id} ${sys.version} ${sys.session} ${sys.tf}M ${event.s} ${event.r}`);
+
+  const current=positionsBySystem.get(sys.id);
+  if(current&&current.side!==event.s){
+    await closeSystem(sys,event.s);
+    const x=await open(sys,event.s,event.t);
+    if(x)positionsBySystem.set(sys.id,{side:event.s,id:v(x,["position_id","id","positionId"])});
+    return;
+  }
+  if(current)return;
+
+  const x=await open(sys,event.s,event.t);
+  if(x)positionsBySystem.set(sys.id,{side:event.s,id:v(x,["position_id","id","positionId"])});
+}
+
+function processMinute(c){
+  const ss=sess(c.ts);
+  if(!cur||Math.floor(c.ts/60000)!==Math.floor(cur.ts/60000)){
+    if(cur)raw.push(cur);
+    raw=raw.slice(-10000);
+    cur={...c};
+    if(!ss)return;
+
+    for(const sys of SYSTEMS){
+      if(sys.session!==ss.s)continue;
+      const a=dataFor(sys);
+      if(a.length<3)continue;
+      const e=events(a).at(-1);
+      if(!e)continue;
+      if(e.t!==a.at(-1).ts)continue;
+      handle(sys,e).catch(x=>console.error("[MFP EXEC ERROR]",sys.id,x?.message||x));
+    }
+    return;
+  }
+  cur.high=Math.max(cur.high,c.high);
+  cur.low=Math.min(cur.low,c.low);
+  cur.close=c.close;
+}
+
+if(!key)throw Error("MFP_API_KEY missing");
+console.log("[MFP 4TF STRATEGY] V3-S1-2M | V2-S1-3M | V3-S3-4M | V2-S1-5M");
+console.log(`[MFP EXECUTOR] MARKET=${market} LIVE_TRADING=${live} DRY_RUN_ONLY=${dry} USER_LIVE_CONFIRMATION=${liveConfirm} EXECUTION_ENABLED=${executionEnabled}`);
+
+await account();
+console.log("[MFP AUTH] authenticated; account ready");
+
+const mi=u(await client.getMarket({market_id:market}));
+const streamSymbol=v(mi,["coin","stream_symbol","symbol","market_symbol","ticker","name"]);
+if(!streamSymbol)throw Error("MFP stream symbol unavailable");
+console.log("[MFP MARKET] stream symbol="+streamSymbol);
+
+while(true){
+  try{
+    const stream=new PriceStream({symbols:[streamSymbol]});
+    console.log("[MFP STREAM] GOLD connected");
+    for await(const t of stream){
+      const p=+v(t,["price","mid","mark"]);
+      if(!Number.isFinite(p))continue;
+      const ts=+v(t,["timestamp","time","ts"])||Date.now();
+      const m=Math.floor(ts/60000)*60000;
+      if(!cur||cur.ts!==m)processMinute({ts:m,open:p,high:p,low:p,close:p});
+      else processMinute({ts:m,open:cur.open,high:Math.max(cur.high,p),low:Math.min(cur.low,p),close:p});
+    }
+    console.error("[MFP STREAM END] reconnecting in 3000ms");
+  }catch(x){
+    console.error("[MFP STREAM ERROR] "+(x?.message||x)+"; reconnecting in 3000ms");
+  }
+  await new Promise(r=>setTimeout(r,3000));
+}
