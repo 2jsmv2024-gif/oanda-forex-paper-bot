@@ -18,9 +18,8 @@ const FILL_CONFIRM_MS=15000;
 const FILL_POLL_MS=500;
 const ORDER_COOLDOWN_RETRY_MS=5000;
 const ORDER_COOLDOWN_RETRIES=3;
-const PORTFOLIO_BASE_QTY=+(process.env.MFP_BASE_QTY||"18");
-const PORTFOLIO_SCALE_QTY=+(process.env.MFP_SCALED_QTY||"6");
-const PORTFOLIO_MAX_QTY=+(process.env.MFP_MAX_QTY||"24");
+const PORTFOLIO_TOTAL_MARGIN=+(process.env.MFP_BASE_BALANCE||"500000");
+const PORTFOLIO_MARGIN_PER_TF=+(process.env.MFP_BASE_SIZE_ANCHOR||String(PORTFOLIO_TOTAL_MARGIN/2));
 const PORTFOLIO_MAX_POSITIONS=2;
 
 const SYSTEMS=[
@@ -139,21 +138,31 @@ async function account(){
 async function portfolioOrderSize(accountId,sys,side){
   const ps=u(await client.listOpenPositions({account_id:accountId}));
   const arr=Array.isArray(ps)?ps:ps?.data||[];
-  const gold=arr.filter(p=>String(v(p,["market_id","marketId","market","symbol","ticker"])||"").toUpperCase().includes("GOLD"));
-  const count=gold.length;
-  const exposure=gold.reduce((n,p)=>n+Math.abs(+(v(p,["size","quantity","qty","position_size","positionSize"])||0)),0);
+  const marketKey=String(market).toUpperCase();
+  const open=arr.filter(p=>{
+    const m=String(v(p,["market_id","marketId","market","symbol","ticker"])||"").toUpperCase();
+    return m===marketKey || m.includes("GOLD");
+  });
+  const count=open.length;
   if(count>=PORTFOLIO_MAX_POSITIONS){
     console.warn(`[MFP PORTFOLIO BLOCK] ${sys.id} ${side} open_positions=${count} max=${PORTFOLIO_MAX_POSITIONS}`);
     return null;
   }
-  const remaining=Math.max(0,PORTFOLIO_MAX_QTY-exposure);
-  const target=count===0?PORTFOLIO_BASE_QTY:PORTFOLIO_SCALE_QTY;
-  const size=Math.min(target,remaining);
-  if(size<=0){
-    console.warn(`[MFP PORTFOLIO BLOCK] ${sys.id} ${side} exposure=${exposure} max=${PORTFOLIO_MAX_QTY}`);
+  const price=+(cur?.close||0);
+  if(!Number.isFinite(price)||price<=0)throw Error("market price unavailable for size calculation");
+  const existingMargin=open.reduce((n,p)=>{
+    const sz=Math.abs(+(v(p,["size","quantity","qty","position_size","positionSize"])||0));
+    const px=+(v(p,["entry_price","entryPrice","price","mark_price","markPrice"])||price);
+    return n+(sz*px/lev);
+  },0);
+  const remainingMargin=Math.max(0,PORTFOLIO_TOTAL_MARGIN-existingMargin);
+  const targetMargin=Math.min(PORTFOLIO_MARGIN_PER_TF,remainingMargin);
+  if(targetMargin<=0){
+    console.warn(`[MFP PORTFOLIO BLOCK] ${sys.id} ${side} margin_used=${existingMargin} total_margin=${PORTFOLIO_TOTAL_MARGIN}`);
     return null;
   }
-  console.log(`[MFP PORTFOLIO] ${sys.id} ${side} open_positions=${count} exposure=${exposure} size=${size} max=${PORTFOLIO_MAX_QTY}`);
+  const size=targetMargin*lev/price;
+  console.log(`[MFP PORTFOLIO] ${sys.id} ${side} margin=${targetMargin} leverage=${lev} price=${price} size=${size}`);
   return size;
 }
 
@@ -241,7 +250,7 @@ async function closeSystem(sys,side){
   if(p){
     const pside=String(v(p,["side","position_side","positionSide"])||"").toLowerCase();
     const closeSide=pside.includes("short")?"buy":"sell";
-    const size=Math.abs(+(v(p,["size","quantity","qty","position_size","positionSize"])||qty));
+    const size=Math.abs(+(v(p,["size","quantity","qty","position_size","positionSize"])||0));
     if(size){
       await client.createOrder({body:{
         account_id:await account(),market_id:market,side:closeSide,
