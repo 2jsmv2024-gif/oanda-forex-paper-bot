@@ -1,7 +1,7 @@
 import {MyFundedPerps, PriceStream} from "@myfundedperps/sdk";
 
 const key=(process.env.MFP_API_KEY||"").trim();
-const market=process.env.MFP_MARKET_ID||"BTC-USD";
+const marketHint=process.env.MFP_MARKET_ID||"BTC-USD";\nlet market=marketHint;
 const lev=+(process.env.MFP_LEVERAGE||"5");
 const live=(process.env.LIVE_TRADING||"false").toLowerCase()==="true";
 const dry=(process.env.DRY_RUN_ONLY||"true").toLowerCase()==="true";
@@ -287,7 +287,22 @@ console.log(`[MFP EXECUTOR] MARKET=${market} LEVERAGE=${lev} BASE=${BASE} SCALE=
 await account();
 console.log("[MFP AUTH] authenticated; account ready");
 
-const mi=u(await client.getMarket({market_id:market}));
+let mi=null;
+const candidates=[marketHint,"BTC-USD","hyperliquid|BTC","hyperliquid|xyz:BTC","BTC"];
+for(const candidate of [...new Set(candidates)]){
+  try{
+    const test=u(await client.getMarket({market_id:candidate}));
+    if(test){
+      market=candidate;
+      mi=test;
+      console.log("[MFP MARKET] resolved BTC market_id="+market);
+      break;
+    }
+  }catch(e){
+    console.warn("[MFP MARKET PROBE] "+candidate+" -> "+(e?.code||e?.message||e));
+  }
+}
+if(!mi)throw Error("BTC market could not be resolved");
 const streamSymbol=v(mi,["coin","stream_symbol","symbol","market_symbol","ticker","name"]);
 if(!streamSymbol)throw Error("BTC stream symbol unavailable");
 console.log("[MFP MARKET] market_id="+market+" stream symbol="+streamSymbol);
