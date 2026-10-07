@@ -1,6 +1,8 @@
 import {MyFundedPerps,PriceStream} from "@myfundedperps/sdk";
 const key=(process.env.MFP_API_KEY||"").trim(), market=process.env.MFP_MARKET_ID||"hyperliquid|xyz:GOLD";
-const qty=+(process.env.MFP_BASE_QTY||"18"), scaleQty=+(process.env.MFP_SCALED_QTY||"6"), maxQty=+(process.env.MFP_MAX_QTY||"24"), maxPositions=2, lev=+(process.env.MFP_LEVERAGE||"5");
+const maxPositions=2, lev=+(process.env.MFP_LEVERAGE||"10");
+const totalMargin=+(process.env.MFP_BASE_BALANCE||"500000");
+const marginPerPosition=+(process.env.MFP_BASE_SIZE_ANCHOR||String(totalMargin/2));
 const live=(process.env.LIVE_TRADING||"false").toLowerCase()=="true", dry=(process.env.DRY_RUN_ONLY||"true").toLowerCase()=="true";
 const liveConfirm=(process.env.MFP_USER_LIVE_CONFIRMATION||"").trim()=="YES";
 const executionEnabled=live&&!dry&&liveConfirm;
@@ -20,18 +22,36 @@ else if(p=="SELL"){if(c0.ha_high>r){p="BUY";e.push({t:c0.ts,s:"BUY",r:"REFERENCE
 async function account(){let x=u(await client.listAccounts()),a=Array.isArray(x)?x:x?.data||[];if(!a.length)throw Error("MFP authenticated account unavailable");let configured=(process.env.MFP_ACCOUNT_ID||"").trim();let match=configured?a.find(z=>String(v(z,["account_id","id","accountId"]))===configured):null;let chosen=match||a[0];aid=v(chosen,["account_id","id","accountId"]);if(!aid)throw Error("MFP account identifier unavailable");if(configured&&!match)console.log("[MFP ACCOUNT] configured account not returned by API; using authenticated account");return aid}
 async function portfolioOrderSize(accountId,s,pr,side){
   const ps=await positions();
-  const gold=ps.filter(p=>String(v(p,["market_id","marketId","market","symbol","ticker"])||"").toUpperCase().includes("GOLD"));
-  const count=gold.length;
-  const exposure=gold.reduce((n,p)=>n+Math.abs(+(v(p,["size","quantity","qty","position_size","positionSize"])||0)),0);
-  if(count>=maxPositions){console.log(`[MFP PORTFOLIO BLOCK] ${s} ${pr} ${side} open_positions=${count} max=${maxPositions}`);return null}
-  const remaining=Math.max(0,maxQty-exposure), target=count===0?qty:scaleQty, size=Math.min(target,remaining);
-  if(size<=0){console.log(`[MFP PORTFOLIO BLOCK] ${s} ${pr} ${side} exposure=${exposure} max=${maxQty}`);return null}
-  console.log(`[MFP PORTFOLIO] ${s} ${pr} ${side} open_positions=${count} exposure=${exposure} size=${size} max=${maxQty}`);
+  const marketKey=String(market).toUpperCase();
+  const open=ps.filter(p=>{
+    const m=String(v(p,["market_id","marketId","market","symbol","ticker"])||"").toUpperCase();
+    return m===marketKey || m.includes(marketKey.replace("HYPERLIQUID|",""));
+  });
+  const count=open.length;
+  if(count>=maxPositions){
+    console.log(`[MFP PORTFOLIO BLOCK] ${s} ${pr} ${side} open_positions=${count} max=${maxPositions}`);
+    return null;
+  }
+  const price=+(cur?.close||0);
+  if(!Number.isFinite(price)||price<=0)throw Error("market price unavailable for size calculation");
+  const existingMargin=open.reduce((n,p)=>{
+    const sz=Math.abs(+(v(p,["size","quantity","qty","position_size","positionSize"])||0));
+    const px=+(v(p,["entry_price","entryPrice","price","mark_price","markPrice"])||price);
+    return n+(sz*px/lev);
+  },0);
+  const remainingMargin=Math.max(0,totalMargin-existingMargin);
+  const targetMargin=Math.min(marginPerPosition,remainingMargin);
+  if(targetMargin<=0){
+    console.log(`[MFP PORTFOLIO BLOCK] ${s} ${pr} ${side} margin_used=${existingMargin} total_margin=${totalMargin}`);
+    return null;
+  }
+  const size=targetMargin*lev/price;
+  console.log(`[MFP PORTFOLIO] ${s} ${pr} ${side} margin=${targetMargin} leverage=${lev} price=${price} size=${size}`);
   return size;
 }
 async function open(s,pr,side,t){if(!executionEnabled){console.log(`[MFP DRY SIGNAL] ${s} ${pr} ${side} executionEnabled=${executionEnabled}`);return null}let accountId=await account(), orderQty=await portfolioOrderSize(accountId,s,pr,side); if(orderQty==null)return null; let r=await client.createOrder({body:{account_id:accountId,market_id:market,side:side.toLowerCase(),type:"market",size:orderQty,leverage:lev,margin_mode:"cross",expected_price:cur?.close||undefined}});console.log(`[MFP ORDER ACCEPTED] ${s} ${pr} ${side} ${new Date(t).toISOString()}`);return u(r)}
 async function positions(){let x=u(await client.listOpenPositions({account_id:await account()}));return Array.isArray(x)?x:x?.data||[]}
-async function closeSession(s,why){let ps=await positions();for(const z of slots[s]){let p=ps.find(x=>String(v(x,["position_id","id","positionId"]))==String(z.id));if(p&&executionEnabled){let pid=v(p,["position_id","id","positionId"]),rawSize=v(p,["size","quantity","qty","position_size","positionSize"]),closeSize=Math.abs(+(rawSize||qty)),posSide=String(v(p,["side","position_side","positionSide"])||"long").toLowerCase(),closeSide=posSide.includes("short")?"buy":"sell";await client.createOrder({body:{account_id:await account(),market_id:market,side:closeSide,type:"market",size:closeSize,leverage:lev,margin_mode:"cross",reduce_only:true}});}console.log(`[MFP CLOSE] ${s} ${why}`)}slots[s]=[]}
+async function closeSession(s,why){let ps=await positions();for(const z of slots[s]){let p=ps.find(x=>String(v(x,["position_id","id","positionId"]))==String(z.id));if(p&&executionEnabled){let pid=v(p,["position_id","id","positionId"]),rawSize=v(p,["size","quantity","qty","position_size","positionSize"]),closeSize=Math.abs(+(rawSize||0)),posSide=String(v(p,["side","position_side","positionSide"])||"long").toLowerCase(),closeSide=posSide.includes("short")?"buy":"sell";await client.createOrder({body:{account_id:await account(),market_id:market,side:closeSide,type:"market",size:closeSize,leverage:lev,margin_mode:"cross",reduce_only:true}});}console.log(`[MFP CLOSE] ${s} ${why}`)}slots[s]=[]}
 function ok2(a,b){return a=="T1"?(b=="T2"||b=="T3"):a=="T2"?b=="T1":a=="T3"?b=="T1":false}
 async function candidate(s,pr,side,t,r,tf){console.log(`[MFP SIGNAL] ${s} ${pr} ${side} ${r} tf=${tf}`);let a=slots[s],opp=a.some(x=>x.side!=side);
 if(opp){if(pr=="T3"){console.log(`[MFP REJECTED] ${s} opposite-T3`);return}await closeSession(s,"OPPOSITE_T1_T2");let x=await open(s,pr,side,t);if(x)a.push({side,pr,id:v(x,["position_id","id","positionId"])});return}
