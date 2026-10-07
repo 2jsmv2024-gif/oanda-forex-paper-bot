@@ -1,6 +1,6 @@
 import {MyFundedPerps,PriceStream} from "@myfundedperps/sdk";
 const key=(process.env.MFP_API_KEY||"").trim(), market=process.env.MFP_MARKET_ID||"hyperliquid|xyz:GOLD";
-const qty=+(process.env.MFP_BASE_QTY||"0.150"), lev=+(process.env.MFP_LEVERAGE||"5");
+const qty=+(process.env.MFP_BASE_QTY||"18"), scaleQty=+(process.env.MFP_SCALED_QTY||"6"), maxQty=+(process.env.MFP_MAX_QTY||"24"), maxPositions=2, lev=+(process.env.MFP_LEVERAGE||"5");
 const live=(process.env.LIVE_TRADING||"false").toLowerCase()=="true", dry=(process.env.DRY_RUN_ONLY||"true").toLowerCase()=="true";
 const liveConfirm=(process.env.MFP_USER_LIVE_CONFIRMATION||"").trim()=="YES";
 const executionEnabled=live&&!dry&&liveConfirm;
@@ -18,7 +18,18 @@ if(b){if(p!="BUY"){p="BUY";e.push({t:c0.ts,s:"BUY",r:"NEW_BUY_SIGNAL"})}r=c1.ha_
 if(p=="BUY"){if(c0.ha_low<r){p="SELL";e.push({t:c0.ts,s:"SELL",r:"REFERENCE_LOW_BREAK"});r=c0.ha_high}else r=c0.ha_low}
 else if(p=="SELL"){if(c0.ha_high>r){p="BUY";e.push({t:c0.ts,s:"BUY",r:"REFERENCE_HIGH_BREAK"});r=c0.ha_low}else r=c0.ha_high}}return e}
 async function account(){let x=u(await client.listAccounts()),a=Array.isArray(x)?x:x?.data||[];if(!a.length)throw Error("MFP authenticated account unavailable");let configured=(process.env.MFP_ACCOUNT_ID||"").trim();let match=configured?a.find(z=>String(v(z,["account_id","id","accountId"]))===configured):null;let chosen=match||a[0];aid=v(chosen,["account_id","id","accountId"]);if(!aid)throw Error("MFP account identifier unavailable");if(configured&&!match)console.log("[MFP ACCOUNT] configured account not returned by API; using authenticated account");return aid}
-async function open(s,pr,side,t){if(!executionEnabled){console.log(`[MFP DRY SIGNAL] ${s} ${pr} ${side} executionEnabled=${executionEnabled}`);return null}let r=await client.createOrder({body:{account_id:await account(),market_id:market,side:side.toLowerCase(),type:"market",size:qty,leverage:lev,margin_mode:"cross",expected_price:cur?.close||undefined}});console.log(`[MFP ORDER ACCEPTED] ${s} ${pr} ${side} ${new Date(t).toISOString()}`);return u(r)}
+async function portfolioOrderSize(accountId,s,pr,side){
+  const ps=await positions();
+  const gold=ps.filter(p=>String(v(p,["market_id","marketId","market","symbol","ticker"])||"").toUpperCase().includes("GOLD"));
+  const count=gold.length;
+  const exposure=gold.reduce((n,p)=>n+Math.abs(+(v(p,["size","quantity","qty","position_size","positionSize"])||0)),0);
+  if(count>=maxPositions){console.log(`[MFP PORTFOLIO BLOCK] ${s} ${pr} ${side} open_positions=${count} max=${maxPositions}`);return null}
+  const remaining=Math.max(0,maxQty-exposure), target=count===0?qty:scaleQty, size=Math.min(target,remaining);
+  if(size<=0){console.log(`[MFP PORTFOLIO BLOCK] ${s} ${pr} ${side} exposure=${exposure} max=${maxQty}`);return null}
+  console.log(`[MFP PORTFOLIO] ${s} ${pr} ${side} open_positions=${count} exposure=${exposure} size=${size} max=${maxQty}`);
+  return size;
+}
+async function open(s,pr,side,t){if(!executionEnabled){console.log(`[MFP DRY SIGNAL] ${s} ${pr} ${side} executionEnabled=${executionEnabled}`);return null}let accountId=await account(), orderQty=await portfolioOrderSize(accountId,s,pr,side); if(orderQty==null)return null; let r=await client.createOrder({body:{account_id:accountId,market_id:market,side:side.toLowerCase(),type:"market",size:orderQty,leverage:lev,margin_mode:"cross",expected_price:cur?.close||undefined}});console.log(`[MFP ORDER ACCEPTED] ${s} ${pr} ${side} ${new Date(t).toISOString()}`);return u(r)}
 async function positions(){let x=u(await client.listOpenPositions({account_id:await account()}));return Array.isArray(x)?x:x?.data||[]}
 async function closeSession(s,why){let ps=await positions();for(const z of slots[s]){let p=ps.find(x=>String(v(x,["position_id","id","positionId"]))==String(z.id));if(p&&executionEnabled){let pid=v(p,["position_id","id","positionId"]),rawSize=v(p,["size","quantity","qty","position_size","positionSize"]),closeSize=Math.abs(+(rawSize||qty)),posSide=String(v(p,["side","position_side","positionSide"])||"long").toLowerCase(),closeSide=posSide.includes("short")?"buy":"sell";await client.createOrder({body:{account_id:await account(),market_id:market,side:closeSide,type:"market",size:closeSize,leverage:lev,margin_mode:"cross",reduce_only:true}});}console.log(`[MFP CLOSE] ${s} ${why}`)}slots[s]=[]}
 function ok2(a,b){return a=="T1"?(b=="T2"||b=="T3"):a=="T2"?b=="T1":a=="T3"?b=="T1":false}
