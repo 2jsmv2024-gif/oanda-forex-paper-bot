@@ -1,7 +1,8 @@
 import {MyFundedPerps, PriceStream} from "@myfundedperps/sdk";
 
 const key=(process.env.MFP_API_KEY||"").trim();
-const marketHint=process.env.MFP_MARKET_ID||"BTC-USD";\nlet market=marketHint;
+const marketHint=process.env.MFP_MARKET_ID||"BTC-USD";
+let market=marketHint;
 const lev=+(process.env.MFP_LEVERAGE||"5");
 const live=(process.env.LIVE_TRADING||"false").toLowerCase()==="true";
 const dry=(process.env.DRY_RUN_ONLY||"true").toLowerCase()==="true";
