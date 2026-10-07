@@ -18,6 +18,10 @@ const FILL_CONFIRM_MS=15000;
 const FILL_POLL_MS=500;
 const ORDER_COOLDOWN_RETRY_MS=5000;
 const ORDER_COOLDOWN_RETRIES=3;
+const PORTFOLIO_BASE_QTY=+(process.env.MFP_BASE_QTY||"18");
+const PORTFOLIO_SCALE_QTY=+(process.env.MFP_SCALED_QTY||"6");
+const PORTFOLIO_MAX_QTY=+(process.env.MFP_MAX_QTY||"24");
+const PORTFOLIO_MAX_POSITIONS=2;
 
 const SYSTEMS=[
   {id:"V3-S1-2M",version:"V3",session:"S1",tf:2},
@@ -132,6 +136,27 @@ async function account(){
   return aid;
 }
 
+async function portfolioOrderSize(accountId,sys,side){
+  const ps=u(await client.listOpenPositions({account_id:accountId}));
+  const arr=Array.isArray(ps)?ps:ps?.data||[];
+  const gold=arr.filter(p=>String(v(p,["market_id","marketId","market","symbol","ticker"])||"").toUpperCase().includes("GOLD"));
+  const count=gold.length;
+  const exposure=gold.reduce((n,p)=>n+Math.abs(+(v(p,["size","quantity","qty","position_size","positionSize"])||0)),0);
+  if(count>=PORTFOLIO_MAX_POSITIONS){
+    console.warn(`[MFP PORTFOLIO BLOCK] ${sys.id} ${side} open_positions=${count} max=${PORTFOLIO_MAX_POSITIONS}`);
+    return null;
+  }
+  const remaining=Math.max(0,PORTFOLIO_MAX_QTY-exposure);
+  const target=count===0?PORTFOLIO_BASE_QTY:PORTFOLIO_SCALE_QTY;
+  const size=Math.min(target,remaining);
+  if(size<=0){
+    console.warn(`[MFP PORTFOLIO BLOCK] ${sys.id} ${side} exposure=${exposure} max=${PORTFOLIO_MAX_QTY}`);
+    return null;
+  }
+  console.log(`[MFP PORTFOLIO] ${sys.id} ${side} open_positions=${count} exposure=${exposure} size=${size} max=${PORTFOLIO_MAX_QTY}`);
+  return size;
+}
+
 async function open(sys,side,t){
   if(!executionEnabled){
     console.log(`[MFP DRY SIGNAL] ${sys.id} ${side} executionEnabled=${executionEnabled}`);
@@ -139,6 +164,8 @@ async function open(sys,side,t){
   }
 
   const accountId=await account();
+  const orderQty=await portfolioOrderSize(accountId,sys,side);
+  if(orderQty==null)return null;
   const expected=cur?.close||undefined;
   let r;
   let attempt=0;
@@ -146,7 +173,7 @@ async function open(sys,side,t){
     try{
       r=await client.createOrder({body:{
         account_id:accountId,market_id:market,side:side.toLowerCase(),
-        type:"market",size:qty,leverage:lev,margin_mode:"cross",
+        type:"market",size:orderQty,leverage:lev,margin_mode:"cross",
         expected_price:expected
       }});
       break;
@@ -168,7 +195,7 @@ async function open(sys,side,t){
   const orderId=v(order,["order_id","orderId","id"]);
   const orderStatus=v(order,["status","order_status","orderStatus"]);
   const filled=v(order,["filled_size","filledSize","filled_quantity","filledQuantity","executed_size","executedSize"]);
-  console.log(`[MFP ORDER REQUESTED] ${sys.id} ${side} qty=${qty} expected=${expected??""} orderId=${orderId??""} status=${orderStatus??""} filled=${filled??""}`);
+  console.log(`[MFP ORDER REQUESTED] ${sys.id} ${side} qty=${orderQty} expected=${expected??""} orderId=${orderId??""} status=${orderStatus??""} filled=${filled??""}`);
   console.log("[MFP ORDER RESPONSE] "+JSON.stringify(order).slice(0,5000));
 
   // createOrder() is only a request acknowledgement. Do not treat it as a
@@ -200,7 +227,7 @@ async function open(sys,side,t){
     await new Promise(r=>setTimeout(r,FILL_POLL_MS));
   }
 
-  console.warn(`[MFP NOT FILLED] ${sys.id} ${side} qty=${qty} orderId=${orderId??""} afterMs=${FILL_CONFIRM_MS}; no position armed`);
+  console.warn(`[MFP NOT FILLED] ${sys.id} ${side} qty=${orderQty} orderId=${orderId??""} afterMs=${FILL_CONFIRM_MS}; no position armed`);
   return null;
 }
 
