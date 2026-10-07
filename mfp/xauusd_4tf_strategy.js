@@ -168,6 +168,16 @@ async function portfolioOrderSize(accountId,sys,side){
 }
 
 async function open(sys,side,t){
+  try{
+    const liveMarket=u(await client.getMarket({market_id:market}));
+    if(liveMarket && liveMarket.trading_enabled===false){
+      console.warn(`[MFP MARKET BLOCK] ${sys.id} ${side} trading_enabled=false reduce_only=${liveMarket.reduce_only===true}`);
+      return null;
+    }
+  }catch(e){
+    console.error(`[MFP MARKET CHECK ERROR] ${sys.id} ${side} ${e?.message||e}`);
+    return null;
+  }
   if(!executionEnabled){
     console.log(`[MFP DRY SIGNAL] ${sys.id} ${side} executionEnabled=${executionEnabled}`);
     return null;
