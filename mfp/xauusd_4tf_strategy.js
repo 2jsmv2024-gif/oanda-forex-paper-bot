@@ -2,6 +2,7 @@ import {MyFundedPerps,PriceStream} from "@myfundedperps/sdk";
 
 const key=(process.env.MFP_API_KEY||"").trim();
 const market=process.env.MFP_MARKET_ID||"hyperliquid|xyz:GOLD";
+let orderMarket=market;
 const qty=+(process.env.MFP_BASE_QTY||"0.150");
 const lev=+(process.env.MFP_LEVERAGE||"5");
 const live=(process.env.LIVE_TRADING||"false").toLowerCase()==="true";
@@ -138,7 +139,7 @@ async function account(){
 async function portfolioOrderSize(accountId,sys,side){
   const ps=u(await client.listOpenPositions({account_id:accountId}));
   const arr=Array.isArray(ps)?ps:ps?.data||[];
-  const marketKey=String(market).toUpperCase();
+  const marketKey=String(orderMarket).toUpperCase();
   const open=arr.filter(p=>{
     const m=String(v(p,["market_id","marketId","market","symbol","ticker"])||"").toUpperCase();
     return m===marketKey || m.includes("GOLD");
@@ -181,7 +182,7 @@ async function open(sys,side,t){
   while(true){
     try{
       r=await client.createOrder({body:{
-        account_id:accountId,market_id:market,side:side.toLowerCase(),
+        account_id:accountId,market_id:orderMarket,side:side.toLowerCase(),
         type:"market",size:orderQty,leverage:lev,margin_mode:"cross",
         expected_price:expected
       }});
@@ -253,7 +254,7 @@ async function closeSystem(sys,side){
     const size=Math.abs(+(v(p,["size","quantity","qty","position_size","positionSize"])||0));
     if(size){
       await client.createOrder({body:{
-        account_id:await account(),market_id:market,side:closeSide,
+        account_id:await account(),market_id:orderMarket,side:closeSide,
         type:"market",size,leverage:lev,margin_mode:"cross",reduce_only:true
       }});
     }
@@ -313,6 +314,9 @@ await account();
 console.log("[MFP AUTH] authenticated; account ready");
 
 const mi=u(await client.getMarket({market_id:market}));
+orderMarket=v(mi,["market_id","marketId","id"])||market;
+console.log("[MFP MARKET META] "+JSON.stringify(mi).slice(0,5000));
+console.log("[MFP ORDER MARKET] "+orderMarket);
 const streamSymbol=v(mi,["coin","stream_symbol","symbol","market_symbol","ticker","name"]);
 if(!streamSymbol)throw Error("MFP stream symbol unavailable");
 console.log("[MFP MARKET] stream symbol="+streamSymbol);
