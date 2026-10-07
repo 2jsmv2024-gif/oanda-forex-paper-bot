@@ -144,17 +144,21 @@ async function open(sys,side,t){
 
 async function closeSystem(sys,side){
   if(!executionEnabled)return;
+  const tracked=positionsBySystem.get(sys.id);
+  if(!tracked?.id)return;
   const ps=u(await client.listOpenPositions({account_id:await account()}));
   const arr=Array.isArray(ps)?ps:ps?.data||[];
-  for(const p of arr){
+  const p=arr.find(x=>String(v(x,["position_id","id","positionId"]))===String(tracked.id));
+  if(p){
     const pside=String(v(p,["side","position_side","positionSide"])||"").toLowerCase();
     const closeSide=pside.includes("short")?"buy":"sell";
     const size=Math.abs(+(v(p,["size","quantity","qty","position_size","positionSize"])||qty));
-    if(!size)continue;
-    await client.createOrder({body:{
-      account_id:await account(),market_id:market,side:closeSide,
-      type:"market",size,leverage:lev,margin_mode:"cross",reduce_only:true
-    }});
+    if(size){
+      await client.createOrder({body:{
+        account_id:await account(),market_id:market,side:closeSide,
+        type:"market",size,leverage:lev,margin_mode:"cross",reduce_only:true
+      }});
+    }
   }
   positionsBySystem.delete(sys.id);
   console.log(`[MFP CLOSE] ${sys.id} ${side}`);
