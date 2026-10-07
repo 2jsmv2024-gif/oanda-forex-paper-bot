@@ -16,6 +16,8 @@ const positionsBySystem=new Map();
 const lastSignal=new Map();
 const FILL_CONFIRM_MS=15000;
 const FILL_POLL_MS=500;
+const ORDER_COOLDOWN_RETRY_MS=5000;
+const ORDER_COOLDOWN_RETRIES=3;
 
 const SYSTEMS=[
   {id:"V3-S1-2M",version:"V3",session:"S1",tf:2},
@@ -139,15 +141,27 @@ async function open(sys,side,t){
   const accountId=await account();
   const expected=cur?.close||undefined;
   let r;
-  try{
-    r=await client.createOrder({body:{
-      account_id:accountId,market_id:market,side:side.toLowerCase(),
-      type:"market",size:qty,leverage:lev,margin_mode:"cross",
-      expected_price:expected
-    }});
-  }catch(e){
-    console.error(`[MFP ORDER ERROR] ${sys.id} ${side} message=${e?.message||e} status=${e?.status??""} code=${e?.code??""}`);
-    throw e;
+  let attempt=0;
+  while(true){
+    try{
+      r=await client.createOrder({body:{
+        account_id:accountId,market_id:market,side:side.toLowerCase(),
+        type:"market",size:qty,leverage:lev,margin_mode:"cross",
+        expected_price:expected
+      }});
+      break;
+    }catch(e){
+      const code=String(e?.code??"").toLowerCase();
+      const msg=String(e?.message||e);
+      if(code==="cooldown" && attempt<ORDER_COOLDOWN_RETRIES){
+        attempt++;
+        console.warn(`[MFP ORDER COOLDOWN] ${sys.id} ${side} attempt=${attempt}/${ORDER_COOLDOWN_RETRIES}; waiting ${ORDER_COOLDOWN_RETRY_MS}ms before retry`);
+        await new Promise(r=>setTimeout(r,ORDER_COOLDOWN_RETRY_MS));
+        continue;
+      }
+      console.error(`[MFP ORDER ERROR] ${sys.id} ${side} message=${msg} status=${e?.status??""} code=${e?.code??""}`);
+      throw e;
+    }
   }
 
   const order=u(r);
@@ -169,8 +183,10 @@ async function open(sys,side,t){
       const p=arr.find(x=>{
         const m=String(v(x,["market_id","marketId","market","symbol","ticker"])||"").toUpperCase();
         const pside=String(v(x,["side","position_side","positionSide"])||"").toLowerCase();
+        const isBuyPosition=pside.includes("long")||pside.includes("buy");
+        const isSellPosition=pside.includes("short")||pside.includes("sell");
         return (m===String(market).toUpperCase()||m.includes("GOLD")) &&
-          ((side==="BUY"&&pside.includes("long"))||(side==="SELL"&&pside.includes("short")));
+          ((side==="BUY"&&isBuyPosition)||(side==="SELL"&&isSellPosition));
       });
       if(p){
         const pid=v(p,["position_id","positionId","id"]);
