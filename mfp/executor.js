@@ -33,9 +33,60 @@ if(!key)throw Error("MFP_API_KEY missing");
 console.log(`[MFP EXECUTOR] PRIMARY_ENGINE=57-59 MARKET=${market} LIVE_TRADING=${live} DRY_RUN_ONLY=${dry} USER_LIVE_CONFIRMATION=${liveConfirm} EXECUTION_ENABLED=${executionEnabled}`);
 await account();console.log("[MFP AUTH] authenticated; account ready");
 let marketMeta=null, marketReady=false, lastMarketCheck=0;
-async function refreshMarket(){try{const mi=u(await client.getMarket({market_id:market})); marketMeta=mi; const enabled=mi?.trading_enabled===true; const reduceOnly=mi?.reduce_only===true; marketReady=enabled&&!reduceOnly; if(marketReady) console.log(`[MFP MARKET READY] ${market} trading_enabled=true reduce_only=false`); else console.log(`[MFP MARKET WAIT] ${market} trading_enabled=${mi?.trading_enabled} reduce_only=${mi?.reduce_only}`); lastMarketCheck=Date.now(); return marketReady;}catch(e){marketReady=false; console.error("[MFP MARKET CHECK ERROR] "+(e?.message||e)); lastMarketCheck=Date.now(); return false;}}
-await refreshMarket();
-const streamSymbol=v(marketMeta,["coin","stream_symbol","symbol","market_symbol","ticker","name"]); if(!streamSymbol) throw Error("MFP stream symbol unavailable"); console.log("[MFP MARKET] stream symbol="+streamSymbol);
+async function refreshMarket(){
+  try{
+    const mi=u(await client.getMarket({market_id:market}));
+    marketMeta=mi;
+    const enabled=mi?.trading_enabled===true;
+    const reduceOnly=mi?.reduce_only===true;
+    marketReady=enabled&&!reduceOnly;
+    if(marketReady) console.log(`[MFP MARKET READY] ${market} trading_enabled=true reduce_only=false`);
+    else console.log(`[MFP MARKET WAIT] ${market} trading_enabled=${mi?.trading_enabled} reduce_only=${mi?.reduce_only}`);
+    lastMarketCheck=Date.now();
+    return marketReady;
+  }catch(e){
+    marketReady=false;
+    console.error("[MFP MARKET CHECK ERROR] "+(e?.message||e));
+    lastMarketCheck=Date.now();
+    return false;
+  }
+}
+async function resolveMarket(){
+  const hints=[marketHint,"binance|XAU","binance|XAU-USD","binance|XAUUSD","XAU-USD","hyperliquid|xyz:GOLD"];
+  const seen=new Set();
+  let first=null;
+  for(const candidate of hints){
+    if(!candidate||seen.has(candidate))continue;
+    seen.add(candidate);
+    try{
+      const mi=u(await client.getMarket({market_id:candidate}));
+      if(!mi)continue;
+      console.log(`[MFP MARKET PROBE] ${candidate} trading_enabled=${mi?.trading_enabled} reduce_only=${mi?.reduce_only} coin=${v(mi,["coin","stream_symbol","symbol","market_symbol","ticker","name"])}`);
+      if(!first){first={id:candidate,meta:mi};}
+      if(mi?.trading_enabled===true && mi?.reduce_only!==true){
+        market=candidate;
+        marketMeta=mi;
+        marketReady=true;
+        console.log(`[MFP MARKET SELECTED] ${market} trading_enabled=true reduce_only=false`);
+        return true;
+      }
+    }catch(e){
+      console.warn(`[MFP MARKET PROBE] ${candidate} -> ${e?.code||e?.message||e}`);
+    }
+  }
+  if(first){
+    market=first.id;
+    marketMeta=first.meta;
+    marketReady=false;
+    console.error(`[MFP MARKET NO-TRADE-CANDIDATE] selected=${market} trading_enabled=${marketMeta?.trading_enabled} reduce_only=${marketMeta?.reduce_only}`);
+    return false;
+  }
+  throw Error("XAU market could not be resolved");
+}
+await resolveMarket();
+const streamSymbol=v(marketMeta,["coin","stream_symbol","symbol","market_symbol","ticker","name"]);
+if(!streamSymbol) throw Error("MFP stream symbol unavailable");
+console.log("[MFP MARKET] market_id="+market+" stream symbol="+streamSymbol);
 async function streamLoop(streamSymbol){
 while(true){
 try{
