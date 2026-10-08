@@ -137,36 +137,18 @@ async function account(){
 }
 
 async function portfolioOrderSize(accountId,sys,side){
-  const ps=u(await client.listOpenPositions({account_id:accountId}));
-  const arr=Array.isArray(ps)?ps:ps?.data||[];
-  const marketKey=String(orderMarket).toUpperCase();
-  const open=arr.filter(p=>{
-    const m=String(v(p,["market_id","marketId","market","symbol","ticker"])||"").toUpperCase();
-    return m===marketKey || m.includes("GOLD");
-  });
-  const count=open.length;
-  if(count>=PORTFOLIO_MAX_POSITIONS){
-    console.warn(`[MFP PORTFOLIO BLOCK] ${sys.id} ${side} open_positions=${count} max=${PORTFOLIO_MAX_POSITIONS}`);
+  // FIX: use the configured GOLD quantity instead of deriving a huge
+  // margin-based size from the competition balance. The previous calculation
+  // produced 121-607+ GOLD orders and those were rejected by MFP trading rules.
+  // Keep the strategy/signals unchanged; only execution sizing is corrected.
+  const orderQty=qty;
+  if(!Number.isFinite(orderQty)||orderQty<=0){
+    console.warn(`[MFP QTY BLOCK] ${sys.id} ${side} invalid MFP_BASE_QTY=${orderQty}`);
     return null;
   }
-  const price=+(cur?.close||0);
-  if(!Number.isFinite(price)||price<=0)throw Error("market price unavailable for size calculation");
-  const existingMargin=open.reduce((n,p)=>{
-    const sz=Math.abs(+(v(p,["size","quantity","qty","position_size","positionSize"])||0));
-    const px=+(v(p,["entry_price","entryPrice","price","mark_price","markPrice"])||price);
-    return n+(sz*px/lev);
-  },0);
-  const remainingMargin=Math.max(0,PORTFOLIO_TOTAL_MARGIN-existingMargin);
-  const targetMargin=Math.min(PORTFOLIO_MARGIN_PER_TF,remainingMargin);
-  if(targetMargin<=0){
-    console.warn(`[MFP PORTFOLIO BLOCK] ${sys.id} ${side} margin_used=${existingMargin} total_margin=${PORTFOLIO_TOTAL_MARGIN}`);
-    return null;
-  }
-  const size=targetMargin*lev/price;
-  console.log(`[MFP PORTFOLIO] ${sys.id} ${side} margin=${targetMargin} leverage=${lev} price=${price} size=${size}`);
-  return size;
+  console.log(`[MFP FIXED QTY] ${sys.id} ${side} qty=${orderQty} leverage=${lev}`);
+  return orderQty;
 }
-
 async function open(sys,side,t){
   try{
     const liveMarket=u(await client.getMarket({market_id:market}));
