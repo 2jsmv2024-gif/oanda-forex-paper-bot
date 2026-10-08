@@ -25,6 +25,8 @@ def fetch_order_fills(session, account, start, end):
         "type": "ORDER_FILL",
     }
     meta = session.get(url, params=params, timeout=60)
+    if meta.status_code == 416:
+        return
     meta.raise_for_status()
     body = meta.json()
 
