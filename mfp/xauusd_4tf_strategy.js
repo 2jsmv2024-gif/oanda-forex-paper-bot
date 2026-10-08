@@ -1,4 +1,5 @@
 import {MyFundedPerps,PriceStream} from "@myfundedperps/sdk";
+import http from "node:http";
 
 const key=(process.env.MFP_API_KEY||"").trim();
 let market=process.env.MFP_MARKET_ID||"hyperliquid|xyz:GOLD";
@@ -15,6 +16,45 @@ let aid=(process.env.MFP_ACCOUNT_ID||"").trim();
 let raw=[],cur=null,sk=null;
 const positionsBySystem=new Map();
 const lastSignal=new Map();
+let latestBridgeSignal=null;
+
+// MT5 bridge feed: exposes the latest strategy signal over HTTP.
+// Deliberately omits qty so the MT5 EA uses its own VolumeLots input (0.15).
+function publishBridgeSignal(sys,event){
+  latestBridgeSignal={
+    id:`${sys.id}|${event.t}|${event.s}|${event.r}`,
+    signal_id:`${sys.id}|${event.t}|${event.s}|${event.r}`,
+    timestamp:new Date(event.t).toISOString(),
+    signal_time:new Date(event.t).toISOString(),
+    side:event.s,
+    price:cur?.close||0,
+    source:"GOLD_4TF",
+    system:sys.id,
+    version:sys.version,
+    session:sys.session,
+    timeframe_minutes:sys.tf,
+    reason:event.r
+  };
+  console.log("[MT5 BRIDGE SIGNAL] "+JSON.stringify(latestBridgeSignal));
+}
+
+const bridgePort=+(process.env.PORT||"8080");
+const bridgeServer=http.createServer((req,res)=>{
+  const url=new URL(req.url||"/","http://127.0.0.1");
+  if(url.pathname==="/health"||url.pathname==="/"){
+    res.writeHead(200,{"content-type":"application/json"});
+    res.end(JSON.stringify({ok:true,service:"MFP XAUUSD 4TF",signal_ready:!!latestBridgeSignal}));
+    return;
+  }
+  if(url.pathname==="/signal"||url.pathname==="/signal/gold-4tf"){
+    res.writeHead(200,{"content-type":"application/json","cache-control":"no-store"});
+    res.end(JSON.stringify(latestBridgeSignal||{id:"",signal_id:"",side:"",price:0,source:"GOLD_4TF"}));
+    return;
+  }
+  res.writeHead(404,{"content-type":"application/json"});
+  res.end(JSON.stringify({error:"not_found"}));
+});
+bridgeServer.listen(bridgePort,"0.0.0.0",()=>console.log(`[MT5 BRIDGE HTTP] listening port=${bridgePort}`));
 const FILL_CONFIRM_MS=15000;
 const FILL_POLL_MS=500;
 const ORDER_COOLDOWN_RETRY_MS=5000;
@@ -267,6 +307,7 @@ async function handle(sys,event){
   if(lastSignal.get(sys.id)===key)return;
   lastSignal.set(sys.id,key);
   console.log(`[MFP SIGNAL] ${sys.id} ${sys.version} ${sys.session} ${sys.tf}M ${event.s} ${event.r}`);
+  publishBridgeSignal(sys,event);
 
   const current=positionsBySystem.get(sys.id);
   if(current&&current.side!==event.s){
