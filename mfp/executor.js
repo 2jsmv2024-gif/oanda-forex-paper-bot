@@ -72,7 +72,7 @@ async function refreshMarket(){
   }
 }
 async function resolveMarket(){
-  const hints=[marketHint,"binance|XAU","binance|XAU-USD","binance|XAUUSD","XAU-USD","hyperliquid|xyz:GOLD"];
+  const hints=[market,"binance|XAU","binance|XAU-USD","binance|XAUUSD","XAU-USD","hyperliquid|xyz:GOLD"];
   const seen=new Set();
   let first=null;
   for(const candidate of hints){
