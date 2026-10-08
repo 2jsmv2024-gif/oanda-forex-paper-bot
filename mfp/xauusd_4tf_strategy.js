@@ -1,7 +1,7 @@
 import {MyFundedPerps,PriceStream} from "@myfundedperps/sdk";
 
 const key=(process.env.MFP_API_KEY||"").trim();
-const market=process.env.MFP_MARKET_ID||"hyperliquid|xyz:GOLD";
+let market=process.env.MFP_MARKET_ID||"hyperliquid|xyz:GOLD";
 let orderMarket=market;
 const qty=+(process.env.MFP_BASE_QTY||"0.150");
 const lev=+(process.env.MFP_LEVERAGE||"5");
