@@ -136,13 +136,20 @@ async function account(){
   if(!arr.length)throw Error("MFP authenticated account unavailable");
   const configured=(process.env.MFP_ACCOUNT_ID||"").trim();
   const match=configured?arr.find(z=>String(v(z,["account_id","id","accountId"]))===configured):null;
-  if(configured&&!match)throw Error(`MFP configured account ${configured} was not returned by API; refusing fallback to another account`);
-  if(!configured)throw Error("MFP_ACCOUNT_ID is required; refusing implicit account selection");
-  const chosen=match;
-  accountId=v(chosen,["account_id","id","accountId"]);
-  if(!accountId)throw Error("MFP account identifier unavailable");
-  if(configured&&!match)console.log("[MFP ACCOUNT] configured account not returned by API; using authenticated account");
-  return accountId;
+  if(match){
+    accountId=v(match,["account_id","id","accountId"]);
+    if(!accountId)throw Error("MFP account identifier unavailable");
+    console.log("[MFP ACCOUNT] configured account matched: "+accountId);
+    return accountId;
+  }
+  if(arr.length===1){
+    accountId=v(arr[0],["account_id","id","accountId"]);
+    if(!accountId)throw Error("MFP account identifier unavailable");
+    console.warn("[MFP ACCOUNT] configured account "+(configured||"<missing>")+" not returned; using the only authenticated account returned by API: "+accountId);
+    return accountId;
+  }
+  const ids=arr.map(z=>String(v(z,["account_id","id","accountId"]))).filter(Boolean);
+  throw Error("MFP account mismatch: configured="+(configured||"<missing>")+" returned=["+ids.join(",")+"] ; refusing ambiguous account selection");
 }
 
 async function positions(){
