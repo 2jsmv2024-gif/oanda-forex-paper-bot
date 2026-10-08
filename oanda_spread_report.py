@@ -7,6 +7,7 @@ import requests
 REST_URL = os.getenv("OANDA_BASE_URL", "https://api-fxpractice.oanda.com").rstrip("/")
 TOKEN = (os.getenv("OANDA_API_TOKEN", "") or os.getenv("OANDA_TOKEN", "")).strip()
 DAYS = int(os.getenv("OANDA_REPORT_DAYS", "30"))
+REPORT_FROM = os.getenv("OANDA_REPORT_FROM", "").strip()
 CHUNK_HOURS = int(os.getenv("OANDA_REPORT_CHUNK_HOURS", "6"))
 OUT = Path(os.getenv("OANDA_OUTPUT_DIR", "./oanda_output"))
 OUT.mkdir(parents=True, exist_ok=True)
@@ -57,10 +58,14 @@ def main():
         account = accounts[0]["id"]
 
     end = datetime.now(timezone.utc)
-    start = end - timedelta(days=DAYS)
+    if REPORT_FROM:
+        start = datetime.fromisoformat(REPORT_FROM.replace("Z", "+00:00")).astimezone(timezone.utc)
+    else:
+        start = end - timedelta(days=DAYS)
 
     opens = {}
     trades = []
+    seen_fill_ids = set()
     transaction_count = 0
     cursor = start
     step = timedelta(hours=max(1, CHUNK_HOURS))
@@ -74,6 +79,11 @@ def main():
     while cursor < end:
         chunk_end = min(cursor + step, end)
         for t in fetch_order_fills(session, account, cursor, chunk_end):
+            txid = str(t.get("id", ""))
+            if txid and txid in seen_fill_ids:
+                continue
+            if txid:
+                seen_fill_ids.add(txid)
             transaction_count += 1
             instrument = t.get("instrument", "")
             opened = t.get("tradeOpened")
