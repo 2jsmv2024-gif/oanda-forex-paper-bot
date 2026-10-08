@@ -187,8 +187,10 @@ async function open(sys,side,t){
   }
 
   const accountId=await account();
-  const orderQty=await portfolioOrderSize(accountId,sys,side);
-  if(orderQty==null)return null;
+  // GOLD execution uses the configured fixed quantity. Do not replace MFP_BASE_QTY with portfolio-margin sizing.
+  // Current MFP GOLD exposure is small enough that the old 120+ GOLD sizing was rejected by market limits.
+  const orderQty=qty;
+  console.log(`[MFP FIXED QTY] ${sys.id} ${side} qty=${orderQty} leverage=${lev}`);
   const expected=cur?.close||undefined;
   let r;
   let attempt=0;
