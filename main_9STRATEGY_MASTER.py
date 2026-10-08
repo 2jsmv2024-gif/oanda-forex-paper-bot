@@ -42,6 +42,9 @@ import json
 import time
 import math
 import subprocess
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
@@ -117,7 +120,150 @@ SIGNAL_ENGINES = [
     "57-59_OPPOSITE",
     "57-59_TRUE_REVERSE",
 ]
+
 ENGINES = SIGNAL_ENGINES[:]
+
+# ============================================================
+# MT5 FX SIGNAL FEED
+# Pair+engine PF rule:
+#   PF > 1.65  -> execute original direction
+#   PF < 0.65  -> execute reversed direction
+#   0.65..1.65 -> no MT5 signal
+# This feed is additive only: it does NOT change the OANDA strategy
+# execution below.
+# ============================================================
+MT5_FEED_ENABLED = os.getenv("MT5_FEED_ENABLED", "true").strip().lower() == "true"
+MT5_FEED_PORT = int(os.getenv("PORT", "8080"))
+_MT5_SIGNAL_LOCK = threading.Lock()
+_MT5_SIGNAL_SEQ = 0
+_MT5_SIGNAL_QUEUE = []
+_MT5_SIGNAL_QUEUE_MAX = 500
+
+_MT5_HIGH_PF = {
+    ("EURUSD", "V2"),
+    ("EURAUD", "A"), ("EURAUD", "B"), ("EURAUD", "V2"), ("EURAUD", "V3"),
+    ("EURCAD", "57-59"), ("EURCAD", "A"), ("EURCAD", "B"), ("EURCAD", "V2"), ("EURCAD", "V3"),
+    ("GBPAUD", "57-59"), ("GBPAUD", "A"), ("GBPAUD", "B"), ("GBPAUD", "V2"), ("GBPAUD", "V3"),
+    ("USDJPY", "A"), ("USDJPY", "B"),
+}
+
+_MT5_LOW_PF = {
+    ("EURUSD", "A"), ("EURUSD", "B"),
+    ("EURNZD", "57-59"), ("EURNZD", "A"), ("EURNZD", "B"), ("EURNZD", "V2"), ("EURNZD", "V3"),
+    ("EURJPY", "V3"), ("EURJPY", "57-59"), ("EURJPY", "A"), ("EURJPY", "B"),
+    ("EURCHF", "A"), ("EURCHF", "B"), ("EURCHF", "V2"), ("EURCHF", "V3"), ("EURCHF", "57-59"),
+    ("GBPUSD", "57-59"), ("GBPUSD", "V3"),
+    ("GBPCAD", "B"), ("GBPCAD", "V3"), ("GBPCAD", "57-59"), ("GBPCAD", "V2"),
+    ("GBPJPY", "57-59"), ("GBPJPY", "A"), ("GBPJPY", "B"), ("GBPJPY", "V2"), ("GBPJPY", "V3"),
+    ("GBPNZD", "V2"), ("GBPNZD", "V3"), ("GBPNZD", "57-59"), ("GBPNZD", "A"), ("GBPNZD", "B"),
+}
+
+def _mt5_engine_bucket(engine):
+    return {
+        "V3_NORMAL": "V3",
+        "57-59_NORMAL": "57-59",
+    }.get(engine, engine)
+
+def _mt5_pf_action(market, engine):
+    key = (market, _mt5_engine_bucket(engine))
+    if key in _MT5_HIGH_PF:
+        return "AS_IS", False
+    if key in _MT5_LOW_PF:
+        return "REVERSE", True
+    return "", False
+
+def publish_mt5_signal(market, instrument, engine, tf, session, event):
+    global _MT5_SIGNAL_SEQ
+    action, reverse = _mt5_pf_action(market, engine)
+    if not action:
+        return
+
+    original_side = str(event["side"]).upper()
+    final_side = ("SELL" if original_side == "BUY" else "BUY") if reverse else original_side
+    entry_time = pd.Timestamp(event["entry_time"]).isoformat()
+    reason = str(event.get("reason", "SIGNAL"))
+    signal_price = float(event.get("entry", 0.0) or 0.0)
+
+    with _MT5_SIGNAL_LOCK:
+        _MT5_SIGNAL_SEQ += 1
+        seq = _MT5_SIGNAL_SEQ
+        payload = {
+            "seq": seq,
+            "id": f"MT5-{seq}-{market}-{_mt5_engine_bucket(engine)}-{tf}-{entry_time}",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "signal_time": entry_time,
+            "market": market,
+            "instrument": instrument,
+            "mt5_symbol": market,
+            "engine": _mt5_engine_bucket(engine),
+            "engine_source": engine,
+            "tf": int(tf),
+            "session": session,
+            "original_side": original_side,
+            "side": final_side,
+            "pf_action": action,
+            "reason": reason,
+            "price": signal_price,
+        }
+        _MT5_SIGNAL_QUEUE.append(payload)
+        if len(_MT5_SIGNAL_QUEUE) > _MT5_SIGNAL_QUEUE_MAX:
+            del _MT5_SIGNAL_QUEUE[:-_MT5_SIGNAL_QUEUE_MAX]
+
+    print(
+        f"[MT5 FEED] seq={seq} {market} {_mt5_engine_bucket(engine)} "
+        f"TF={tf} {session} {original_side}->{final_side} action={action}",
+        flush=True,
+    )
+
+class _MT5FeedHandler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        return
+
+    def _send(self, code, body, content_type="application/json"):
+        raw = body.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_GET(self):
+        path = urlparse(self.path)
+        if path.path == "/mt5/health":
+            with _MT5_SIGNAL_LOCK:
+                count = len(_MT5_SIGNAL_QUEUE)
+                seq = _MT5_SIGNAL_SEQ
+            self._send(200, json.dumps({
+                "ok": True,
+                "service": "OANDA 15-MARKET MT5 PF FEED",
+                "signal_count": count,
+                "latest_seq": seq,
+            }, separators=(",", ":")))
+            return
+
+        if path.path == "/mt5/signals":
+            try:
+                after = int(parse_qs(path.query).get("after", ["0"])[0])
+            except (TypeError, ValueError):
+                after = 0
+            with _MT5_SIGNAL_LOCK:
+                rows = [x for x in _MT5_SIGNAL_QUEUE if int(x["seq"]) > after]
+            body = "\n".join(json.dumps(x, separators=(",", ":")) for x in rows)
+            self._send(200, body, "application/x-ndjson")
+            return
+
+        self._send(404, json.dumps({"ok": False, "error": "not_found"}))
+
+def start_mt5_feed_server():
+    if not MT5_FEED_ENABLED:
+        print("[MT5 FEED] disabled", flush=True)
+        return None
+    server = ThreadingHTTPServer(("0.0.0.0", MT5_FEED_PORT), _MT5FeedHandler)
+    thread = threading.Thread(target=server.serve_forever, name="mt5-feed", daemon=True)
+    thread.start()
+    print(f"[MT5 FEED] listening port={MT5_FEED_PORT} paths=/mt5/health,/mt5/signals", flush=True)
+    return server
 
 # Nine requested components. MFP_FROZEN is the frozen portfolio layer,
 # not an additional independent signal generator.
@@ -919,6 +1065,17 @@ def process_live_market(market, state, closed_m1, boundary_ts, s, account_id):
                 flush=True,
             )
 
+            # Publish only the PF-qualified pair+engine combinations to MT5.
+            # This does not alter the OANDA order sent by execute_signal().
+            publish_mt5_signal(
+                market,
+                MARKETS[market],
+                engine,
+                tf,
+                session,
+                last,
+            )
+
             # ALL 8 SIGNAL ENGINES ARE LIVE-EXECUTION ENABLED.
             # Every engine/TF/session that produces a qualifying signal may
             # place its own OANDA order. There is intentionally NO
@@ -1222,6 +1379,8 @@ def main():
     print("Orders:", "ENABLED (PRACTICE)" if LIVE_TRADING_ENABLED else "DRY-RUN")
     print("Time state:", trading_state())
     print("=" * 100)
+
+    start_mt5_feed_server()
 
     if MASTER_MODE == "LIVE":
         print("[NINE-COMPONENT MODE] All 8 signal engines + frozen MFP layer enabled.", flush=True)
