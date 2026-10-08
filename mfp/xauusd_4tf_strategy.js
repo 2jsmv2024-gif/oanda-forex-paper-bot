@@ -322,13 +322,46 @@ console.log(`[MFP EXECUTOR] MARKET=${market} LIVE_TRADING=${live} DRY_RUN_ONLY=$
 await account();
 console.log("[MFP AUTH] authenticated; account ready");
 
-const mi=u(await client.getMarket({market_id:market}));
+const marketCandidates=[
+  market,
+  "binance|XAU",
+  "binance|XAU-USD",
+  "binance|XAUUSD",
+  "XAU-USD",
+  "hyperliquid|xyz:GOLD"
+];
+let mi=null;
+let firstMarket=null;
+for(const candidate of [...new Set(marketCandidates)]){
+  try{
+    const test=u(await client.getMarket({market_id:candidate}));
+    if(!test)continue;
+    console.log("[MFP MARKET PROBE] "+candidate+" trading_enabled="+test?.trading_enabled+" reduce_only="+test?.reduce_only+" coin="+(v(test,["coin","stream_symbol","symbol","market_symbol","ticker","name"])||""));
+    if(!firstMarket)firstMarket={id:candidate,meta:test};
+    if(test?.trading_enabled===true && test?.reduce_only!==true){
+      market=candidate;
+      mi=test;
+      break;
+    }
+  }catch(e){
+    console.warn("[MFP MARKET PROBE] "+candidate+" -> "+(e?.code||e?.message||e));
+  }
+}
+if(!mi){
+  if(firstMarket){
+    market=firstMarket.id;
+    mi=firstMarket.meta;
+    console.error("[MFP MARKET NO TRADEABLE CANDIDATE] selected="+market+" trading_enabled="+mi?.trading_enabled+" reduce_only="+mi?.reduce_only);
+  }else{
+    throw Error("XAU market could not be resolved");
+  }
+}
 orderMarket=v(mi,["market_id","marketId","id"])||market;
 console.log("[MFP MARKET META] "+JSON.stringify(mi).slice(0,5000));
 console.log("[MFP ORDER MARKET] "+orderMarket);
 const streamSymbol=v(mi,["coin","stream_symbol","symbol","market_symbol","ticker","name"]);
 if(!streamSymbol)throw Error("MFP stream symbol unavailable");
-console.log("[MFP MARKET] stream symbol="+streamSymbol);
+console.log("[MFP MARKET] market_id="+market+" stream symbol="+streamSymbol);
 
 while(true){
   try{
