@@ -152,6 +152,18 @@ async function portfolioOrderSize(accountId,sys,side){
 async function open(sys,side,t){
   try{
     const liveMarket=u(await client.getMarket({market_id:market}));
+    const tradingEnabled=liveMarket?.trading_enabled===true;
+    const reduceOnly=liveMarket?.reduce_only===true;
+    if(!tradingEnabled || reduceOnly){
+      console.warn(`[MFP ORDER BLOCKED] ${sys.id} ${side} market not open: trading_enabled=${liveMarket?.trading_enabled} reduce_only=${liveMarket?.reduce_only}`);
+      return null;
+    }
+  }catch(e){
+    console.error(`[MFP MARKET CHECK ERROR] ${sys.id} ${side} ${e?.message||e}`);
+    return null;
+  }
+  try{
+    const liveMarket=u(await client.getMarket({market_id:market}));
     if(liveMarket && liveMarket.trading_enabled===false){
       // The market metadata endpoint has been reporting GOLD as trading_enabled=false
       // while the MFP web terminal is accepting XAU/GOLD orders. Do not suppress a
