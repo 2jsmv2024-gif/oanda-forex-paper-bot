@@ -1,5 +1,5 @@
 import {MyFundedPerps,PriceStream} from "@myfundedperps/sdk";
-const key=(process.env.MFP_API_KEY||"").trim(), market=process.env.MFP_MARKET_ID||"hyperliquid|xyz:GOLD";
+const key=(process.env.MFP_API_KEY||"").trim(); let market=process.env.MFP_MARKET_ID||"hyperliquid|xyz:GOLD";
 const qty=+(process.env.MFP_BASE_QTY||"0.150"), lev=+(process.env.MFP_LEVERAGE||"5");
 const live=(process.env.LIVE_TRADING||"false").toLowerCase()=="true", dry=(process.env.DRY_RUN_ONLY||"true").toLowerCase()=="true";
 const liveConfirm=(process.env.MFP_USER_LIVE_CONFIRMATION||"").trim()=="YES";
