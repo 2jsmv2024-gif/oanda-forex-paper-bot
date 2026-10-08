@@ -188,7 +188,7 @@ async function open(sys,side){
     try{
       response=await client.createOrder({body:{
         account_id:aid,market_id:market,side:side.toLowerCase(),type:"market",
-        size,leverage:lev,margin_mode:"cross",expected_price:cur?.close||undefined
+        size,leverage:lev,margin_mode:"isolated",expected_price:cur?.close||undefined
       }});
       break;
     }catch(e){
@@ -235,7 +235,7 @@ async function closeTracked(sys){
     if(size>0){
       await client.createOrder({body:{
         account_id:await account(),market_id:market,side:closeSide,type:"market",
-        size,leverage:lev,margin_mode:"cross",reduce_only:true
+        size,leverage:lev,margin_mode:"isolated",reduce_only:true
       }});
       console.log(`[BTC CLOSE] ${sys.id} size=${size}`);
     }
