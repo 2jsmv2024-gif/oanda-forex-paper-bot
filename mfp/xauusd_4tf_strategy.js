@@ -180,7 +180,7 @@ async function open(sys,side,t){
     try{
       r=await client.createOrder({body:{
         account_id:accountId,market_id:orderMarket,side:side.toLowerCase(),
-        type:"market",size:orderQty,leverage:lev,margin_mode:"cross",
+        type:"market",size:orderQty,leverage:lev,margin_mode:"isolated",
         expected_price:expected
       }});
       break;
@@ -252,7 +252,7 @@ async function closeSystem(sys,side){
     if(size){
       await client.createOrder({body:{
         account_id:await account(),market_id:orderMarket,side:closeSide,
-        type:"market",size,leverage:lev,margin_mode:"cross",reduce_only:true
+        type:"market",size,leverage:lev,margin_mode:"isolated",reduce_only:true
       }});
     }
   }
