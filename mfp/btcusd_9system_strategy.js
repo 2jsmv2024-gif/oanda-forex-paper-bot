@@ -39,6 +39,7 @@ const SYSTEMS=[
 
 const v=(x,keys)=>{for(const k of keys)if(x?.[k]!=null)return x[k];return null};
 const u=x=>x?.data??x;
+function orderErrorDetails(e){const out={message:e?.message??String(e),code:e?.code??null,status:e?.status??e?.statusCode??null,type:e?.type??null,details:e?.details??null,response:e?.response?.data??e?.response??null,body:e?.body??null};try{return JSON.stringify(out).slice(0,8000)}catch{return String(e?.message??e)}}
 
 function ist(ts){
   const d=new Date(ts+19800000);
@@ -135,7 +136,9 @@ async function account(){
   if(!arr.length)throw Error("MFP authenticated account unavailable");
   const configured=(process.env.MFP_ACCOUNT_ID||"").trim();
   const match=configured?arr.find(z=>String(v(z,["account_id","id","accountId"]))===configured):null;
-  const chosen=match||arr[0];
+  if(configured&&!match)throw Error(`MFP configured account ${configured} was not returned by API; refusing fallback to another account`);
+  if(!configured)throw Error("MFP_ACCOUNT_ID is required; refusing implicit account selection");
+  const chosen=match;
   accountId=v(chosen,["account_id","id","accountId"]);
   if(!accountId)throw Error("MFP account identifier unavailable");
   if(configured&&!match)console.log("[MFP ACCOUNT] configured account not returned by API; using authenticated account");
@@ -198,7 +201,7 @@ async function open(sys,side){
         await new Promise(r=>setTimeout(r,COOLDOWN_MS));
         continue;
       }
-      console.error("[BTC ORDER ERROR]",e?.message||e);
+      console.error("[BTC ORDER ERROR] "+orderErrorDetails(e));
       return null;
     }
   }
