@@ -32,7 +32,10 @@ cur.high=Math.max(cur.high,c.high);cur.low=Math.min(cur.low,c.low);cur.close=c.c
 if(!key)throw Error("MFP_API_KEY missing");
 console.log(`[MFP EXECUTOR] PRIMARY_ENGINE=57-59 MARKET=${market} LIVE_TRADING=${live} DRY_RUN_ONLY=${dry} USER_LIVE_CONFIRMATION=${liveConfirm} EXECUTION_ENABLED=${executionEnabled}`);
 await account();console.log("[MFP AUTH] authenticated; account ready");
-let marketMeta=null, marketReady=false, lastMarketCheck=0;\nasync function refreshMarket(){try{const mi=u(await client.getMarket({market_id:market})); marketMeta=mi; const enabled=mi?.trading_enabled===true; const reduceOnly=mi?.reduce_only===true; marketReady=enabled&&!reduceOnly; if(marketReady) console.log(`[MFP MARKET READY] ${market} trading_enabled=true reduce_only=false`); else console.log(`[MFP MARKET WAIT] ${market} trading_enabled=${mi?.trading_enabled} reduce_only=${mi?.reduce_only}`); lastMarketCheck=Date.now(); return marketReady;}catch(e){marketReady=false; console.error("[MFP MARKET CHECK ERROR] "+(e?.message||e)); lastMarketCheck=Date.now(); return false;}}\nawait refreshMarket();\nconst streamSymbol=v(marketMeta,["coin","stream_symbol","symbol","market_symbol","ticker","name"]); if(!streamSymbol) throw Error("MFP stream symbol unavailable"); console.log("[MFP MARKET] stream symbol="+streamSymbol);
+let marketMeta=null, marketReady=false, lastMarketCheck=0;
+async function refreshMarket(){try{const mi=u(await client.getMarket({market_id:market})); marketMeta=mi; const enabled=mi?.trading_enabled===true; const reduceOnly=mi?.reduce_only===true; marketReady=enabled&&!reduceOnly; if(marketReady) console.log(`[MFP MARKET READY] ${market} trading_enabled=true reduce_only=false`); else console.log(`[MFP MARKET WAIT] ${market} trading_enabled=${mi?.trading_enabled} reduce_only=${mi?.reduce_only}`); lastMarketCheck=Date.now(); return marketReady;}catch(e){marketReady=false; console.error("[MFP MARKET CHECK ERROR] "+(e?.message||e)); lastMarketCheck=Date.now(); return false;}}
+await refreshMarket();
+const streamSymbol=v(marketMeta,["coin","stream_symbol","symbol","market_symbol","ticker","name"]); if(!streamSymbol) throw Error("MFP stream symbol unavailable"); console.log("[MFP MARKET] stream symbol="+streamSymbol);
 async function streamLoop(streamSymbol){
 while(true){
 try{
