@@ -150,18 +150,20 @@ async function portfolioOrderSize(accountId,sys,side){
   return orderQty;
 }
 async function open(sys,side,t){
-  // FIRE IMMEDIATELY: createOrder() is the first broker call after a valid
-  // signal. Do not wait for market metadata probes here; those probes can be
-  // stale and were adding avoidable latency before the actual order request.
+  // FIRE IMMEDIATELY: createOrder() is the first broker execution call after
+  // a valid signal. Quantity may be reduced to the market minimum only when
+  // the configured quantity is invalid; never block a valid signal merely
+  // because the preferred size is unavailable.
   if(!executionEnabled){
     console.log(`[MFP DRY SIGNAL] ${sys.id} ${side} executionEnabled=${executionEnabled}`);
     return null;
   }
 
   const accountId=await account();
-  // GOLD execution uses the configured fixed quantity. Do not replace MFP_BASE_QTY with portfolio-margin sizing.
-  // Current MFP GOLD exposure is small enough that the old 120+ GOLD sizing was rejected by market limits.
-  const orderQty=qty;
+  // Prefer configured quantity. If it is invalid, use the resolved market's
+  // minimum size so the strategy can still exercise its execution path.
+  const marketMin=Math.max(0.0001,+(v(mi||{},["min_size","minSize"])||0.0001));
+  const orderQty=(Number.isFinite(qty)&&qty>0)?qty:marketMin;
   console.log(`[MFP FIXED QTY] ${sys.id} ${side} qty=${orderQty} leverage=${lev}`);
   const expected=cur?.close||undefined;
   let r;
@@ -280,10 +282,15 @@ function processMinute(c){
     for(const sys of SYSTEMS){
       if(sys.session!==ss.s)continue;
       const a=dataFor(sys);
-      if(a.length<3)continue;
+      const latest=a.at(-1);
+      if(a.length<3){
+        console.log(`[MFP 4TF WAIT] ${sys.id} candles=${a.length} need=3`);
+        continue;
+      }
       const e=events(a).at(-1);
+      console.log(`[MFP 4TF EVAL] ${sys.id} candleTs=${latest?.ts??""} eventTs=${e?.t??""} event=${e?.s??"NONE"} reason=${e?.r??""}`);
       if(!e)continue;
-      if(e.t!==a.at(-1).ts)continue;
+      if(e.t!==latest.ts)continue;
       handle(sys,e).catch(x=>console.error("[MFP EXEC ERROR]",sys.id,x?.message||x));
     }
     return;
