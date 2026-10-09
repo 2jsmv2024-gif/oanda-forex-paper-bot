@@ -1,7 +1,7 @@
-const http = require("node:http");
-const fs = require("node:fs/promises");
-const path = require("node:path");
-const crypto = require("node:crypto");
+const http = require("http");
+const fs = require("fs").promises;
+const path = require("path");
+const crypto = require("crypto");
 
 const PORT = Number(process.env.PORT || 3000);
 const TOKEN = process.env.COPIER_TOKEN || "";
