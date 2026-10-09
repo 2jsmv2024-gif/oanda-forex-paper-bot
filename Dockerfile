@@ -8,7 +8,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN dpkg --add-architecture i386 \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates wget curl nodejs nginx wine64 wine32:i386 xvfb x11vnc novnc websockify openbox winbind cabextract fonts-liberation \
+      ca-certificates wget curl nodejs nginx wine wine64 wine32:i386 xvfb x11vnc novnc websockify openbox winbind cabextract fonts-liberation \
  && rm -rf /var/lib/apt/lists/*
 
 COPY start.sh /usr/local/bin/start.sh
