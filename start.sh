@@ -33,9 +33,11 @@ x11vnc -display :0 -rfbauth "$PASSFILE" -rfbport 5900 -localhost -forever -share
 VNC_PID=$!
 websockify --web=/usr/share/novnc 127.0.0.1:6080 127.0.0.1:5900 >/data/websockify.log 2>&1 &
 WEB_PID=$!
+nginx -g 'daemon off;' >/data/nginx.log 2>&1 &
+NGINX_PID=$!
 
 cleanup() {
-  kill "$WEB_PID" "$VNC_PID" "$OPENBOX_PID" "$XVFB_PID" "$COPIER_PID" 2>/dev/null || true
+  kill "$NGINX_PID" "$WEB_PID" "$VNC_PID" "$OPENBOX_PID" "$XVFB_PID" "$COPIER_PID" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
