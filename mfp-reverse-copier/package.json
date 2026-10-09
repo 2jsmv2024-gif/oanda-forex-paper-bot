@@ -1,0 +1,12 @@
+{
+  "name": "mt5-reverse-copier",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Authenticated persistent signal queue for a reverse MT5 trade copier",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
