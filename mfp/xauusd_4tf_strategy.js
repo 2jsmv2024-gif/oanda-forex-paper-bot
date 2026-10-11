@@ -409,21 +409,15 @@ orderMarket=v(mi,["market_id","marketId","id"])||market;
 console.log("[MFP MARKET META] "+JSON.stringify(mi).slice(0,5000));
 console.log("[MFP ORDER MARKET] "+orderMarket);
 console.log("[MFP EXPOSURE LIMIT] max_pair_exposure_usd="+MAX_PAIR_EXPOSURE_USD);
-const streamSymbol="BTCUSDT";
-console.log("[BTC FEED] public Binance websocket BTCUSDT; MFP order execution uses REST");
+console.log("[MFP REST FEED] polling Binance-sourced BTCUSDT quote through MFP REST");
 while(true){
  try{
-  const stream=new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@trade");
-  console.log("[BINANCE WS] connecting btcusdt@trade");
-  await new Promise((resolve,reject)=>{
-   let opened=false;
-   const timer=setTimeout(()=>{try{stream.close()}catch{};if(!opened)reject(new Error("Binance websocket connect timeout"))},15000);
-   stream.onopen=()=>{opened=true;clearTimeout(timer);console.log("[BINANCE WS] connected BTCUSDT");};
-   stream.onmessage=ev=>{try{const t=JSON.parse(ev.data);const p=+t.p;if(!Number.isFinite(p)||p<=0)return;const ts=+t.T||Date.now(),m=Math.floor(ts/60000)*60000;if(!cur||cur.ts!==m)processMinute({ts:m,open:p,high:p,low:p,close:p});else processMinute({ts:m,open:cur.open,high:Math.max(cur.high,p),low:Math.min(cur.low,p),close:p})}catch(e){console.error("[BINANCE WS MESSAGE]",e?.message||e)}};
-   stream.onerror=()=>{clearTimeout(timer);reject(new Error("Binance websocket error"))};
-   stream.onclose=()=>{clearTimeout(timer);resolve()};
-  });
-  console.warn("[BINANCE WS] disconnected; reconnecting");
- }catch(e){console.error("[BINANCE WS ERROR] "+(e?.message||e))}
- await new Promise(r=>setTimeout(r,3000));
+  const q=u(await rest("GET","/markets/"+encodeURIComponent(market)+"/quote"));
+  const p=+(q?.mid??q?.mid_price??q?.mark_price??q?.price??((+(q?.bid||q?.best_bid||0)+ +(q?.ask||q?.best_ask||0))/2));
+  if(!Number.isFinite(p)||p<=0)throw new Error("MFP REST quote has no valid midpoint");
+  const ts=Date.now(),m=Math.floor(ts/60000)*60000;
+  if(!cur||cur.ts!==m)processMinute({ts:m,open:p,high:p,low:p,close:p});
+  else processMinute({ts:m,open:cur.open,high:Math.max(cur.high,p),low:Math.min(cur.low,p),close:p});
+ }catch(e){console.error("[MFP REST QUOTE ERROR] "+(e?.message||e))}
+ await new Promise(r=>setTimeout(r,1000));
 }
