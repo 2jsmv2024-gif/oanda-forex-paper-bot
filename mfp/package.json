@@ -3,7 +3,5 @@
   "scripts": {
     "start": "node executor.js"
   },
-  "dependencies": {
-    "@myfundedperps/sdk": "0.1.0"
-  }
+  "dependencies": {}
 }
