@@ -1,5 +1,4 @@
-import {MyFundedPerps,PriceStream} from "@myfundedperps/sdk";
-import http from "node:http";
+// MFP REST executor; Binance public websocket supplies BTCUSDT prices.
 
 const key=(process.env.MFP_API_KEY||"").trim();
 let market=process.env.MFP_MARKET_ID||"binance|BTCUSDT";
@@ -11,50 +10,26 @@ const dry=(process.env.DRY_RUN_ONLY||"true").toLowerCase()==="true";
 const liveConfirm=(process.env.MFP_USER_LIVE_CONFIRMATION||"").trim()==="YES";
 const executionEnabled=live&&!dry&&liveConfirm;
 
-const client=new MyFundedPerps({apiKey:key});
+const REST_BASE=(process.env.MFP_REST_BASE_URL||"https://developers.myfundedperpetuals.com/v1").replace(/\/$/,"");
+async function rest(method,path,body,idem){
+ const headers={Authorization:"Bearer "+key,Accept:"application/json"};
+ if(body!==undefined)headers["Content-Type"]="application/json";
+ if(idem)headers["Idempotency-Key"]=idem;
+ const response=await fetch(REST_BASE+path,{method,headers,body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000)});
+ const rawText=await response.text();let payload={};try{payload=rawText?JSON.parse(rawText):{}}catch{payload={raw:rawText.slice(0,1000)}}
+ if(!response.ok){const e=new Error("MFP REST "+method+" "+path+" -> HTTP "+response.status+": "+JSON.stringify(payload).slice(0,2000));e.status=response.status;e.payload=payload;throw e}
+ return payload;
+}
+const listAccounts=()=>rest("GET","/accounts");
+const getMarket=id=>rest("GET","/markets/"+encodeURIComponent(id));
+const listPositions=id=>rest("GET","/positions?account_id="+encodeURIComponent(id)+"&status=open&limit=100");
+const placeOrder=(body,idem)=>rest("POST","/orders",body,idem);
+const closePosition=(id,body,idem)=>rest("POST","/positions/"+encodeURIComponent(id)+"/close",body,idem);
 let aid=(process.env.MFP_ACCOUNT_ID||"").trim();
 let raw=[],cur=null,sk=null;
 const positionsBySystem=new Map();
 const lastSignal=new Map();
-let latestBridgeSignal=null;
 
-// MT5 bridge feed: exposes the latest strategy signal over HTTP.
-// Deliberately omits qty so the MT5 EA uses its own VolumeLots input (0.15).
-function publishBridgeSignal(sys,event){
-  latestBridgeSignal={
-    id:`${sys.id}|${event.t}|${event.s}|${event.r}`,
-    signal_id:`${sys.id}|${event.t}|${event.s}|${event.r}`,
-    timestamp:new Date(event.t).toISOString(),
-    signal_time:new Date(event.t).toISOString(),
-    side:event.s,
-    price:cur?.close||0,
-    source:"BTC_4TF",
-    system:sys.id,
-    version:sys.version,
-    session:sys.session,
-    timeframe_minutes:sys.tf,
-    reason:event.r
-  };
-  console.log("[MT5 BRIDGE SIGNAL] "+JSON.stringify(latestBridgeSignal));
-}
-
-const bridgePort=+(process.env.PORT||"8080");
-const bridgeServer=http.createServer((req,res)=>{
-  const url=new URL(req.url||"/","http://127.0.0.1");
-  if(url.pathname==="/health"||url.pathname==="/"){
-    res.writeHead(200,{"content-type":"application/json"});
-    res.end(JSON.stringify({ok:true,service:"MFP BTCUSD 4TF",signal_ready:!!latestBridgeSignal}));
-    return;
-  }
-  if(url.pathname==="/signal"||url.pathname==="/signal/btc-4tf"){
-    res.writeHead(200,{"content-type":"application/json","cache-control":"no-store"});
-    res.end(JSON.stringify(latestBridgeSignal||{id:"",signal_id:"",side:"",price:0,source:"BTC_4TF"}));
-    return;
-  }
-  res.writeHead(404,{"content-type":"application/json"});
-  res.end(JSON.stringify({error:"not_found"}));
-});
-bridgeServer.listen(bridgePort,"0.0.0.0",()=>console.log(`[MT5 BRIDGE HTTP] listening port=${bridgePort}`));
 const FILL_CONFIRM_MS=15000;
 const FILL_POLL_MS=500;
 const ORDER_COOLDOWN_RETRY_MS=5000;
@@ -167,7 +142,7 @@ function events(a){
 }
 
 async function account(){
-  const x=u(await client.listAccounts());
+  const x=u(await listAccounts());
   const a=Array.isArray(x)?x:x?.data||[];
   if(!a.length)throw Error("MFP authenticated account unavailable");
   const configured=(process.env.MFP_ACCOUNT_ID||"").trim();
@@ -233,7 +208,7 @@ async function openUnlocked(sys,side,t){
     console.error(`[MFP EXPOSURE BLOCK] ${sys.id} no valid current price; refusing entry`);
     return null;
   }
-  const ps=u(await client.listOpenPositions({account_id:accountId}));
+  const ps=u(await listPositions(accountId));
   const openPositions=Array.isArray(ps)?ps:(ps?.data||[]);
   let currentExposure=0;
   for(const p of openPositions){
@@ -265,11 +240,8 @@ async function openUnlocked(sys,side,t){
   let attempt=0;
   while(true){
     try{
-      r=await client.createOrder({body:{
-        account_id:accountId,market_id:orderMarket,side:side.toLowerCase(),
-        type:"market",size:orderQty,leverage:lev,margin_mode:"isolated",
-        expected_price:expected
-      }});
+      const clientOrderId=("btc4tf:"+sys.id+":"+t+":"+side).slice(0,128);
+      r=await placeOrder({client_order_id:clientOrderId,account_id:accountId,market_id:orderMarket,side:side.toLowerCase(),type:"market",size:orderQty,leverage:lev,margin_mode:"isolated",expected_price:expected},clientOrderId);
       break;
     }catch(e){
       const code=String(e?.code??"").toLowerCase();
@@ -329,7 +301,7 @@ async function closeSystem(sys,side){
   if(!executionEnabled)return;
   const tracked=positionsBySystem.get(sys.id);
   if(!tracked?.id)return;
-  const ps=u(await client.listOpenPositions({account_id:await account()}));
+  const ps=u(await listPositions(await account()));
   const arr=Array.isArray(ps)?ps:ps?.data||[];
   const p=arr.find(x=>String(v(x,["position_id","id","positionId"]))===String(tracked.id));
   if(p){
@@ -337,10 +309,8 @@ async function closeSystem(sys,side){
     const closeSide=pside.includes("short")?"buy":"sell";
     const size=Math.abs(+(v(p,["size","quantity","qty","position_size","positionSize"])||0));
     if(size){
-      await client.createOrder({body:{
-        account_id:await account(),market_id:orderMarket,side:closeSide,
-        type:"market",size,leverage:lev,margin_mode:"isolated",reduce_only:true
-      }});
+      const closeKey=("btc4tf-close:"+sys.id+":"+Date.now()).slice(0,128);
+      await closePosition(tracked.id,{client_order_id:closeKey,type:"market",size,expected_price:cur?.close||undefined},closeKey);
     }
   }
   positionsBySystem.delete(sys.id);
@@ -352,7 +322,7 @@ async function handle(sys,event){
   if(lastSignal.get(sys.id)===key)return;
   lastSignal.set(sys.id,key);
   console.log(`[MFP SIGNAL] ${sys.id} ${sys.version} ${sys.session} ${sys.tf}M ${event.s} ${event.r}`);
-  publishBridgeSignal(sys,event);
+
 
   const current=positionsBySystem.get(sys.id);
   if(current&&current.side!==event.s){
@@ -413,7 +383,7 @@ let mi=null;
 let firstMarket=null;
 for(const candidate of [...new Set(marketCandidates)]){
   try{
-    const test=u(await client.getMarket({market_id:candidate}));
+    const test=u(await getMarket(candidate));
     if(!test)continue;
     console.log("[MFP MARKET PROBE] "+candidate+" trading_enabled="+test?.trading_enabled+" reduce_only="+test?.reduce_only+" coin="+(v(test,["coin","stream_symbol","symbol","market_symbol","ticker","name"])||""));
     if(!firstMarket)firstMarket={id:candidate,meta:test};
@@ -439,25 +409,21 @@ orderMarket=v(mi,["market_id","marketId","id"])||market;
 console.log("[MFP MARKET META] "+JSON.stringify(mi).slice(0,5000));
 console.log("[MFP ORDER MARKET] "+orderMarket);
 console.log("[MFP EXPOSURE LIMIT] max_pair_exposure_usd="+MAX_PAIR_EXPOSURE_USD);
-const streamSymbol=v(mi,["coin","stream_symbol","symbol","market_symbol","ticker","name"]);
-if(!streamSymbol)throw Error("MFP stream symbol unavailable");
-console.log("[MFP MARKET] market_id="+market+" stream symbol="+streamSymbol);
-
+const streamSymbol="BTCUSDT";
+console.log("[BTC FEED] public Binance websocket BTCUSDT; MFP order execution uses REST");
 while(true){
-  try{
-    const stream=new PriceStream({symbols:[streamSymbol]});
-    console.log("[MFP STREAM] MFP SDK market stream connected source="+(v(mi||{},["provider","source_venue","sourceVenue"])||"unknown")+" symbol="+streamSymbol);
-    for await(const t of stream){
-      const p=+v(t,["price","mid","mark"]);
-      if(!Number.isFinite(p))continue;
-      const ts=+v(t,["timestamp","time","ts"])||Date.now();
-      const m=Math.floor(ts/60000)*60000;
-      if(!cur||cur.ts!==m)processMinute({ts:m,open:p,high:p,low:p,close:p});
-      else processMinute({ts:m,open:cur.open,high:Math.max(cur.high,p),low:Math.min(cur.low,p),close:p});
-    }
-    console.error("[MFP STREAM END] reconnecting in 3000ms");
-  }catch(x){
-    console.error("[MFP STREAM ERROR] "+(x?.message||x)+"; reconnecting in 3000ms");
-  }
-  await new Promise(r=>setTimeout(r,3000));
+ try{
+  const stream=new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@trade");
+  console.log("[BINANCE WS] connecting btcusdt@trade");
+  await new Promise((resolve,reject)=>{
+   let opened=false;
+   const timer=setTimeout(()=>{try{stream.close()}catch{};if(!opened)reject(new Error("Binance websocket connect timeout"))},15000);
+   stream.onopen=()=>{opened=true;clearTimeout(timer);console.log("[BINANCE WS] connected BTCUSDT");};
+   stream.onmessage=ev=>{try{const t=JSON.parse(ev.data);const p=+t.p;if(!Number.isFinite(p)||p<=0)return;const ts=+t.T||Date.now(),m=Math.floor(ts/60000)*60000;if(!cur||cur.ts!==m)processMinute({ts:m,open:p,high:p,low:p,close:p});else processMinute({ts:m,open:cur.open,high:Math.max(cur.high,p),low:Math.min(cur.low,p),close:p})}catch(e){console.error("[BINANCE WS MESSAGE]",e?.message||e)}};
+   stream.onerror=()=>{clearTimeout(timer);reject(new Error("Binance websocket error"))};
+   stream.onclose=()=>{clearTimeout(timer);resolve()};
+  });
+  console.warn("[BINANCE WS] disconnected; reconnecting");
+ }catch(e){console.error("[BINANCE WS ERROR] "+(e?.message||e))}
+ await new Promise(r=>setTimeout(r,3000));
 }
