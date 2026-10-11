@@ -1,9 +1,9 @@
 import {MyFundedPerps,PriceStream} from "@myfundedperps/sdk";
-const key=(process.env.MFP_API_KEY||"").trim(); let market=process.env.MFP_MARKET_ID||"hyperliquid|xyz:GOLD";
+const key=(process.env.MFP_API_KEY||"").trim(); let market="binance|BTCUSDT";
 const qty=+(process.env.MFP_BASE_QTY||"0.150"), lev=+(process.env.MFP_LEVERAGE||"5");
 const live=(process.env.LIVE_TRADING||"false").toLowerCase()=="true", dry=(process.env.DRY_RUN_ONLY||"true").toLowerCase()=="true";
 const liveConfirm=(process.env.MFP_USER_LIVE_CONFIRMATION||"").trim()=="YES";
-const executionEnabled=live&&!dry&&liveConfirm;
+const executionEnabled=false; // Safety hold: verify Binance BTC market permissions before enabling live orders.
 const client=new MyFundedPerps({apiKey:key}); let aid=(process.env.MFP_ACCOUNT_ID||"").trim(), raw=[],cur=null,last=new Map(),slots={S1:[],S2:[],S3:[]},sk=null;
 const SES={S1:["03:15","08:15"],S2:["10:15","14:15"],S3:["16:15","21:15"]};
 const TF={S1:{10:"T1",13:"T2",15:"T3"},S2:{6:"T1",14:"T2",15:"T3"},S3:{14:"T1",10:"T2",15:"T3"}};
@@ -50,7 +50,7 @@ function minute(c){let ss=sess(c.ts),k=ss?.k||null;if(k!=sk){if(sk)slots[sk.spli
 if(!cur||Math.floor(c.ts/60000)!=Math.floor(cur.ts/60000)){if(cur)raw.push(cur);raw=raw.slice(-2000);cur={...c};if(!ss)return;for(const[tf,pr]of Object.entries(TF[ss.s])){let a=rows(+tf,ss.s);if(a.length<4)continue;let e=events(a).at(-1);if(!e)continue;let kk=ss.s+"|"+tf,sg=e.t+"|"+e.s+"|"+e.r;if(last.get(kk)==sg)continue;last.set(kk,sg);candidate(ss.s,pr,e.s,e.t,e.r,+tf).catch(x=>console.error("[MFP EXEC ERROR]",x.message))}}
 cur.high=Math.max(cur.high,c.high);cur.low=Math.min(cur.low,c.low);cur.close=c.close}
 if(!key)throw Error("MFP_API_KEY missing");
-console.log(`[MFP EXECUTOR] PRIMARY_ENGINE=57-59 MARKET=${market} LIVE_TRADING=${live} DRY_RUN_ONLY=${dry} USER_LIVE_CONFIRMATION=${liveConfirm} EXECUTION_ENABLED=${executionEnabled}`);
+console.log(`[MFP EXECUTOR] PRIMARY_ENGINE=57-59 MARKET=${market} LIVE_TRADING=${live} DRY_RUN_ONLY=${dry} USER_LIVE_CONFIRMATION=${liveConfirm} EXECUTION_ENABLED=${executionEnabled} BTC_MARKET_VERIFICATION_HOLD=true`);
 await account();console.log("[MFP AUTH] authenticated; account ready");
 let marketMeta=null, marketReady=false, lastMarketCheck=0;
 async function refreshMarket(){
@@ -72,7 +72,7 @@ async function refreshMarket(){
   }
 }
 async function resolveMarket(){
-  const hints=[market,"binance|XAU","binance|XAU-USD","binance|XAUUSD","XAU-USD","hyperliquid|xyz:GOLD"];
+  const hints=["binance|BTCUSDT","binance|BTC-USD","binance|BTCUSD"];
   const seen=new Set();
   let first=null;
   for(const candidate of hints){
@@ -101,7 +101,7 @@ async function resolveMarket(){
     console.error(`[MFP MARKET NO-TRADE-CANDIDATE] selected=${market} trading_enabled=${marketMeta?.trading_enabled} reduce_only=${marketMeta?.reduce_only}`);
     return false;
   }
-  throw Error("XAU market could not be resolved");
+  throw Error("Binance BTC market could not be resolved from supported BTC candidates");
 }
 await resolveMarket();
 const streamSymbol=v(marketMeta,["coin","stream_symbol","symbol","market_symbol","ticker","name"]);
@@ -111,7 +111,7 @@ async function streamLoop(streamSymbol){
 while(true){
 try{
 const stream=new PriceStream({symbols:[streamSymbol]});
-console.log("[MFP STREAM] GOLD connected");
+console.log("[MFP STREAM] Binance BTC connected");
 for await(const t of stream){let p=+v(t,["price","mid","mark"]);if(!Number.isFinite(p))continue;let ts=+v(t,["timestamp","time","ts"])||Date.now(),m=Math.floor(ts/60000)*60000;
 if(!cur||cur.ts!=m)minute({ts:m,open:p,high:p,low:p,close:p});else minute({ts:m,open:cur.open,high:Math.max(cur.high,p),low:Math.min(cur.low,p),close:p})}
 console.error("[MFP STREAM END] price subscription ended; reconnecting in 3000ms");await new Promise(r=>setTimeout(r,3000));
