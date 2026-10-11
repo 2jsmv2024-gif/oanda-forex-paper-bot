@@ -413,28 +413,67 @@ console.log("[MFP ORDER MARKET] "+orderMarket);
 console.log("[MFP EXPOSURE LIMIT] max_pair_exposure_usd="+MAX_PAIR_EXPOSURE_USD);
 const streamSymbol=String(v(mi,["coin","stream_symbol","symbol","market_symbol","ticker"])||"BTCUSDT");
 if(!streamSymbol) throw Error("MFP BTC stream symbol unavailable");
-console.log("[MFP STREAM FEED] starting SDK PriceStream for "+streamSymbol);
+let lastTickAt=0;
+let lastPrice=0;
+function acceptPrice(p,tsRaw){
+  p=+p;
+  if(!Number.isFinite(p)||p<=0)return false;
+  let ts=tsRaw==null?Date.now():(typeof tsRaw==="number"?tsRaw:Date.parse(tsRaw));
+  if(!Number.isFinite(ts)||ts<=0)ts=Date.now();
+  if(ts<1e12)ts*=1000;
+  const m=Math.floor(ts/60000)*60000;
+  if(!cur||cur.ts!==m)processMinute({ts:m,open:p,high:p,low:p,close:p});
+  else processMinute({ts:m,open:cur.open,high:Math.max(cur.high,p),low:Math.min(cur.low,p),close:p});
+  lastTickAt=Date.now();lastPrice=p;
+  return true;
+}
+async function binanceRestPrice(){
+  const response=await fetch("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",{headers:{Accept:"application/json"},signal:AbortSignal.timeout(8000)});
+  if(!response.ok)throw new Error("Binance ticker HTTP "+response.status);
+  const q=await response.json();
+  const p=+q?.price;
+  if(!Number.isFinite(p)||p<=0)throw new Error("Binance ticker returned invalid BTCUSDT price");
+  return p;
+}
+async function fallbackPoll(){
+  console.warn("[MFP FEED FALLBACK] SDK stream has no fresh ticks; switching to Binance public REST ticker");
+  while(true){
+    try{
+      const p=await binanceRestPrice();
+      acceptPrice(p,Date.now());
+      console.log("[MFP FEED FALLBACK TICK] BTCUSDT price="+p);
+    }catch(e){console.error("[MFP FEED FALLBACK ERROR] "+(e?.message||e))}
+    await new Promise(r=>setTimeout(r,2000));
+  }
+}
 async function streamLoop(){
   while(true){
     try{
       const stream=new PriceStream({symbols:[streamSymbol]});
-      console.log("[MFP STREAM] connected symbol="+streamSymbol);
-      for await (const tick of stream){
-        const p=+(v(tick,["price","mid","mark","mid_price","mark_price"])||0);
-        if(!Number.isFinite(p)||p<=0)continue;
-        let tsRaw=v(tick,["timestamp","time","ts"]);
-        let ts=tsRaw==null?Date.now():(typeof tsRaw==="number"?tsRaw:Date.parse(tsRaw));
-        if(!Number.isFinite(ts)||ts<=0)ts=Date.now();
-        if(ts<1e12)ts*=1000;
-        const m=Math.floor(ts/60000)*60000;
-        if(!cur||cur.ts!==m)processMinute({ts:m,open:p,high:p,low:p,close:p});
-        else processMinute({ts:m,open:cur.open,high:Math.max(cur.high,p),low:Math.min(cur.low,p),close:p});
+      console.log("[MFP STREAM] connected symbol="+streamSymbol+"; waiting for ticks");
+      const iterator=stream[Symbol.asyncIterator]();
+      while(true){
+        const next=await Promise.race([
+          iterator.next(),
+          new Promise(resolve=>setTimeout(()=>resolve({timeout:true}),15000))
+        ]);
+        if(next?.timeout){
+          if(Date.now()-lastTickAt>=15000){await fallbackPoll();return}
+          continue;
+        }
+        if(next.done)throw new Error("SDK PriceStream ended");
+        const tick=next.value;
+        const p=v(tick,["price","mid","mark","mid_price","mark_price"]);
+        if(acceptPrice(p,v(tick,["timestamp","time","ts"]))){
+          console.log("[MFP STREAM TICK] "+streamSymbol+" price="+lastPrice);
+        }else{
+          console.warn("[MFP STREAM UNPARSED TICK] "+JSON.stringify(tick).slice(0,1000));
+        }
       }
-      console.warn("[MFP STREAM END] price stream ended; reconnecting in 3 seconds");
     }catch(e){
       console.error("[MFP STREAM ERROR] "+(e?.message||e)+"; reconnecting in 3 seconds");
+      await new Promise(r=>setTimeout(r,3000));
     }
-    await new Promise(r=>setTimeout(r,3000));
   }
 }
 await streamLoop();
