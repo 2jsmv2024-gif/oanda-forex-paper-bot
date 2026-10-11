@@ -2,7 +2,7 @@ import {MyFundedPerps,PriceStream} from "@myfundedperps/sdk";
 import http from "node:http";
 
 const key=(process.env.MFP_API_KEY||"").trim();
-let market=process.env.MFP_MARKET_ID||"hyperliquid|xyz:GOLD";
+let market=process.env.MFP_MARKET_ID||"binance|BTCUSDT";
 let orderMarket=market;
 const qty=+(process.env.MFP_BASE_QTY||"0.150");
 const lev=+(process.env.MFP_LEVERAGE||"5");
@@ -28,7 +28,7 @@ function publishBridgeSignal(sys,event){
     signal_time:new Date(event.t).toISOString(),
     side:event.s,
     price:cur?.close||0,
-    source:"GOLD_4TF",
+    source:"BTC_4TF",
     system:sys.id,
     version:sys.version,
     session:sys.session,
@@ -43,12 +43,12 @@ const bridgeServer=http.createServer((req,res)=>{
   const url=new URL(req.url||"/","http://127.0.0.1");
   if(url.pathname==="/health"||url.pathname==="/"){
     res.writeHead(200,{"content-type":"application/json"});
-    res.end(JSON.stringify({ok:true,service:"MFP XAUUSD 4TF",signal_ready:!!latestBridgeSignal}));
+    res.end(JSON.stringify({ok:true,service:"MFP BTCUSD 4TF",signal_ready:!!latestBridgeSignal}));
     return;
   }
-  if(url.pathname==="/signal"||url.pathname==="/signal/gold-4tf"){
+  if(url.pathname==="/signal"||url.pathname==="/signal/btc-4tf"){
     res.writeHead(200,{"content-type":"application/json","cache-control":"no-store"});
-    res.end(JSON.stringify(latestBridgeSignal||{id:"",signal_id:"",side:"",price:0,source:"GOLD_4TF"}));
+    res.end(JSON.stringify(latestBridgeSignal||{id:"",signal_id:"",side:"",price:0,source:"BTC_4TF"}));
     return;
   }
   res.writeHead(404,{"content-type":"application/json"});
@@ -261,7 +261,7 @@ async function open(sys,side,t){
         const pside=String(v(x,["side","position_side","positionSide"])||"").toLowerCase();
         const isBuyPosition=pside.includes("long")||pside.includes("buy");
         const isSellPosition=pside.includes("short")||pside.includes("sell");
-        return (m===String(market).toUpperCase()||m.includes("GOLD")) &&
+        return (m===String(market).toUpperCase()||m.includes("BTC")||m.includes("BTCUSDT")) &&
           ((side==="BUY"&&isBuyPosition)||(side==="SELL"&&isSellPosition));
       });
       if(p){
@@ -352,7 +352,7 @@ function processMinute(c){
 }
 
 if(!key)throw Error("MFP_API_KEY missing");
-console.log("[MFP 4TF STRATEGY] V3-S1-2M | V2-S1-3M | V3-S3-4M | V2-S1-5M");
+console.log("[MFP 4TF BTC STRATEGY] V3-S1-2M | V2-S1-3M | V3-S3-4M | V2-S1-5M");
 console.log(`[MFP EXECUTOR] MARKET=${market} LIVE_TRADING=${live} DRY_RUN_ONLY=${dry} USER_LIVE_CONFIRMATION=${liveConfirm} EXECUTION_ENABLED=${executionEnabled}`);
 
 await account();
@@ -360,11 +360,9 @@ console.log("[MFP AUTH] authenticated; account ready");
 
 const marketCandidates=[
   market,
-  "binance|XAU",
-  "binance|XAU-USD",
-  "binance|XAUUSD",
-  "XAU-USD",
-  "hyperliquid|xyz:GOLD"
+  "binance|BTCUSDT",
+  "binance|BTC-USD",
+  "binance|BTCUSD"
 ];
 let mi=null;
 let firstMarket=null;
@@ -387,9 +385,9 @@ if(!mi){
   if(firstMarket){
     market=firstMarket.id;
     mi=firstMarket.meta;
-    console.error("[MFP MARKET NO TRADEABLE CANDIDATE] selected="+market+" trading_enabled="+mi?.trading_enabled+" reduce_only="+mi?.reduce_only);
+    console.error("[MFP BTC MARKET NO TRADEABLE CANDIDATE] selected="+market+" trading_enabled="+mi?.trading_enabled+" reduce_only="+mi?.reduce_only);
   }else{
-    throw Error("XAU market could not be resolved");
+    throw Error("BTC market could not be resolved");
   }
 }
 orderMarket=v(mi,["market_id","marketId","id"])||market;
@@ -402,7 +400,7 @@ console.log("[MFP MARKET] market_id="+market+" stream symbol="+streamSymbol);
 while(true){
   try{
     const stream=new PriceStream({symbols:[streamSymbol]});
-    console.log("[MFP STREAM] GOLD connected");
+    console.log("[MFP STREAM] Binance BTC connected");
     for await(const t of stream){
       const p=+v(t,["price","mid","mark"]);
       if(!Number.isFinite(p))continue;
