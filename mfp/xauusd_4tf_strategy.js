@@ -1,4 +1,6 @@
-// MFP REST executor; Binance public websocket supplies BTCUSDT prices.
+import {PriceStream} from "@myfundedperps/sdk";
+
+// MFP REST executor; use the SDK price stream for live BTCUSDT ticks.
 
 const key=(process.env.MFP_API_KEY||"").trim();
 let market=process.env.MFP_MARKET_ID||"binance|BTCUSDT";
@@ -409,15 +411,30 @@ orderMarket=v(mi,["market_id","marketId","id"])||market;
 console.log("[MFP MARKET META] "+JSON.stringify(mi).slice(0,5000));
 console.log("[MFP ORDER MARKET] "+orderMarket);
 console.log("[MFP EXPOSURE LIMIT] max_pair_exposure_usd="+MAX_PAIR_EXPOSURE_USD);
-console.log("[MFP REST FEED] polling Binance-sourced BTCUSDT quote through MFP REST");
-while(true){
- try{
-  const q=u(await rest("GET","/markets/"+encodeURIComponent(market)+"/quote"));
-  const p=+(q?.mid??q?.mid_price??q?.mark_price??q?.price??((+(q?.bid||q?.best_bid||0)+ +(q?.ask||q?.best_ask||0))/2));
-  if(!Number.isFinite(p)||p<=0)throw new Error("MFP REST quote has no valid midpoint");
-  const ts=Date.now(),m=Math.floor(ts/60000)*60000;
-  if(!cur||cur.ts!==m)processMinute({ts:m,open:p,high:p,low:p,close:p});
-  else processMinute({ts:m,open:cur.open,high:Math.max(cur.high,p),low:Math.min(cur.low,p),close:p});
- }catch(e){console.error("[MFP REST QUOTE ERROR] "+(e?.message||e))}
- await new Promise(r=>setTimeout(r,1000));
+const streamSymbol=String(v(mi,["coin","stream_symbol","symbol","market_symbol","ticker"])||"BTCUSDT");
+if(!streamSymbol) throw Error("MFP BTC stream symbol unavailable");
+console.log("[MFP STREAM FEED] starting SDK PriceStream for "+streamSymbol);
+async function streamLoop(){
+  while(true){
+    try{
+      const stream=new PriceStream({symbols:[streamSymbol]});
+      console.log("[MFP STREAM] connected symbol="+streamSymbol);
+      for await (const tick of stream){
+        const p=+(v(tick,["price","mid","mark","mid_price","mark_price"])||0);
+        if(!Number.isFinite(p)||p<=0)continue;
+        let tsRaw=v(tick,["timestamp","time","ts"]);
+        let ts=tsRaw==null?Date.now():(typeof tsRaw==="number"?tsRaw:Date.parse(tsRaw));
+        if(!Number.isFinite(ts)||ts<=0)ts=Date.now();
+        if(ts<1e12)ts*=1000;
+        const m=Math.floor(ts/60000)*60000;
+        if(!cur||cur.ts!==m)processMinute({ts:m,open:p,high:p,low:p,close:p});
+        else processMinute({ts:m,open:cur.open,high:Math.max(cur.high,p),low:Math.min(cur.low,p),close:p});
+      }
+      console.warn("[MFP STREAM END] price stream ended; reconnecting in 3 seconds");
+    }catch(e){
+      console.error("[MFP STREAM ERROR] "+(e?.message||e)+"; reconnecting in 3 seconds");
+    }
+    await new Promise(r=>setTimeout(r,3000));
+  }
 }
+await streamLoop();
