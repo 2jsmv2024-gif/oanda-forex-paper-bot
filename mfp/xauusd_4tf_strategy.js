@@ -42,10 +42,10 @@ const PORTFOLIO_MARGIN_PER_TF=+(process.env.MFP_BASE_SIZE_ANCHOR||String(PORTFOL
 const PORTFOLIO_MAX_POSITIONS=2;
 
 const SYSTEMS=[
-  {id:"V3-S1-2M",version:"V3",session:"S1",tf:2},
-  {id:"V2-S1-3M",version:"V2",session:"S1",tf:3},
-  {id:"V3-S3-4M",version:"V3",session:"S3",tf:4},
-  {id:"V2-S1-5M",version:"V2",session:"S1",tf:5},
+  {id:"5759-OPP-S2-11M",version:"57-59-OPPOSITE",session:"S2",tf:11},
+  {id:"5759-OPP-S2-13M",version:"57-59-OPPOSITE",session:"S2",tf:13},
+  {id:"5759-OPP-S2-7M",version:"57-59-OPPOSITE",session:"S2",tf:7},
+  {id:"5759-OPP-S2-10M",version:"57-59-OPPOSITE",session:"S2",tf:10},
 ];
 
 const SES={S1:["23:45","08:15"],S2:["10:15","14:15"],S3:["16:15","21:15"]};
@@ -105,41 +105,51 @@ function ha(a){
 }
 
 function dataFor(sys){
-  if(sys.version==="V2"){
-    return ha(agg(sys.tf,sys.session));
-  }
+  // 57-59 report builds Heiken Ashi on the full timeframe series,
+  // then filters to the selected session.
   return ha(aggFull(sys.tf)).filter(x=>sess(x.ts)?.s===sys.session);
 }
 
 function events(a){
+  // Frozen 57-59 OPPOSITE logic from the BTCUSD HA backtest:
+  // original BUY -> SELL; original SELL -> BUY.
+  // Structure-reference breaks also reverse the active side.
   const e=[];let side=null,reference=null;
   for(let i=2;i<a.length;i++){
     const c2=a[i-2],c1=a[i-1],c0=a[i];
-    const buy=c2.ha_close>c2.ha_open&&c1.ha_open<c1.ha_high;
-    const sell=c2.ha_close<c2.ha_open&&c1.ha_open>c1.ha_low;
+    const originalBuy=(c2.ha_close>c2.ha_open)&&(c1.ha_open<c1.ha_high);
+    const originalSell=(c2.ha_close<c2.ha_open)&&(c1.ha_open>c1.ha_low);
+    const oppositeSell=originalBuy;
+    const oppositeBuy=originalSell;
 
-    if(side==="BUY"&&sell){
-      e.push({t:c0.ts,s:"SELL",r:"OPPOSITE_SIGNAL"});
-      side="SELL";reference=c1.ha_high;continue;
-    }
-    if(side==="SELL"&&buy){
+    if(side==="SELL"&&oppositeBuy){
       e.push({t:c0.ts,s:"BUY",r:"OPPOSITE_SIGNAL"});
       side="BUY";reference=c1.ha_low;continue;
     }
-    if(side===null){
-      if(buy){e.push({t:c0.ts,s:"BUY",r:"NEW_BUY_SIGNAL"});side="BUY";reference=c1.ha_low;continue}
-      if(sell){e.push({t:c0.ts,s:"SELL",r:"NEW_SELL_SIGNAL"});side="SELL";reference=c1.ha_high;continue}
+    if(side==="BUY"&&oppositeSell){
+      e.push({t:c0.ts,s:"SELL",r:"OPPOSITE_SIGNAL"});
+      side="SELL";reference=c1.ha_high;continue;
     }
-    if(side==="BUY"){
-      if(c0.ha_low<reference){
-        e.push({t:c0.ts,s:"SELL",r:"REFERENCE_LOW_BREAK"});
-        side="SELL";reference=c0.ha_high;
-      }else reference=c0.ha_low;
-    }else if(side==="SELL"){
+    if(side===null){
+      if(oppositeSell){
+        e.push({t:c0.ts,s:"SELL",r:"NEW_SELL_SIGNAL"});
+        side="SELL";reference=c1.ha_high;continue;
+      }
+      if(oppositeBuy){
+        e.push({t:c0.ts,s:"BUY",r:"NEW_BUY_SIGNAL"});
+        side="BUY";reference=c1.ha_low;continue;
+      }
+    }
+    if(side==="SELL"){
       if(c0.ha_high>reference){
         e.push({t:c0.ts,s:"BUY",r:"REFERENCE_HIGH_BREAK"});
         side="BUY";reference=c0.ha_low;
       }else reference=c0.ha_high;
+    }else if(side==="BUY"){
+      if(c0.ha_low<reference){
+        e.push({t:c0.ts,s:"SELL",r:"REFERENCE_LOW_BREAK"});
+        side="SELL";reference=c0.ha_high;
+      }else reference=c0.ha_low;
     }
   }
   return e;
@@ -371,7 +381,7 @@ function processMinute(c){
 }
 
 if(!key)throw Error("MFP_API_KEY missing");
-console.log("[MFP 4TF BTC STRATEGY] V3-S1-2M | V2-S1-3M | V3-S3-4M | V2-S1-5M");
+console.log("[MFP 4TF BTC STRATEGY] 57-59 OPPOSITE S2: 11M | 13M | 7M | 10M");
 console.log(`[MFP EXECUTOR] MARKET=${market} LIVE_TRADING=${live} DRY_RUN_ONLY=${dry} USER_LIVE_CONFIRMATION=${liveConfirm} EXECUTION_ENABLED=${executionEnabled}`);
 
 await account();
