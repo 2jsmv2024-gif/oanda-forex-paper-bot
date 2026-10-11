@@ -48,7 +48,7 @@ const SYSTEMS=[
   {id:"V2-S1-5M",version:"V2",session:"S1",tf:5},
 ];
 
-const SES={S1:["03:15","08:15"],S2:["10:15","14:15"],S3:["16:15","21:15"]};
+const SES={S1:["23:45","08:15"],S2:["10:15","14:15"],S3:["16:15","21:15"]};
 const v=(x,a)=>{for(const k of a)if(x?.[k]!=null)return x[k];return null};
 const u=x=>x?.data??x;
 function orderErrorDetails(e){const out={message:e?.message??String(e),code:e?.code??null,status:e?.status??e?.statusCode??null,type:e?.type??null,details:e?.details??null,response:e?.response?.data??e?.response??null,body:e?.body??null};try{return JSON.stringify(out).slice(0,8000)}catch{return String(e?.message??e)}}
@@ -58,7 +58,9 @@ function sess(t){
   const p=ist(t);
   for(const [s,[a,b]] of Object.entries(SES)){
     const A=a.split(":").map(Number),B=b.split(":").map(Number);
-    if(p.m>=A[0]*60+A[1]&&p.m<B[0]*60+B[1])return{s,k:p.d+"|"+s};
+    const start=A[0]*60+A[1],end=B[0]*60+B[1];
+    const inside=start<=end?(p.m>=start&&p.m<end):(p.m>=start||p.m<end);
+    if(inside)return{s,k:p.d+"|"+s};
   }
 }
 
