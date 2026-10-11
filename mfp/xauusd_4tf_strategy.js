@@ -42,10 +42,15 @@ const PORTFOLIO_MARGIN_PER_TF=+(process.env.MFP_BASE_SIZE_ANCHOR||String(PORTFOL
 const PORTFOLIO_MAX_POSITIONS=2;
 
 const SYSTEMS=[
+  {id:"V3-S1-11M",version:"V3",session:"S1",tf:11},
+  {id:"V3-S1-10M",version:"V3",session:"S1",tf:10},
+  {id:"V2-S1-13M",version:"V2",session:"S1",tf:13},
   {id:"5759-OPP-S2-11M",version:"57-59-OPPOSITE",session:"S2",tf:11},
   {id:"5759-OPP-S2-13M",version:"57-59-OPPOSITE",session:"S2",tf:13},
   {id:"5759-OPP-S2-7M",version:"57-59-OPPOSITE",session:"S2",tf:7},
-  {id:"5759-OPP-S2-10M",version:"57-59-OPPOSITE",session:"S2",tf:10},
+  {id:"5759-OPP-S3-15M",version:"57-59-OPPOSITE",session:"S3",tf:15},
+  {id:"V2-S3-10M",version:"V2",session:"S3",tf:10},
+  {id:"V2-S3-9M",version:"V2",session:"S3",tf:9},
 ];
 
 const SES={S1:["23:45","08:15"],S2:["10:15","14:15"],S3:["16:15","21:15"]};
@@ -105,51 +110,62 @@ function ha(a){
 }
 
 function dataFor(sys){
-  // 57-59 report builds Heiken Ashi on the full timeframe series,
-  // then filters to the selected session.
+  // Match the saved backtest's engine-specific pipeline.
+  if(sys.version==="V2"){
+    const sessionRaw=raw.filter(r=>sess(r.ts)?.s===sys.session);
+    const by=new Map();
+    for(const r of sessionRaw){
+      const k=Math.floor(r.ts/60000/sys.tf)*sys.tf;
+      if(!by.has(k))by.set(k,[]);
+      by.get(k).push(r);
+    }
+    const bars=[...by].sort((a,b)=>a[0]-b[0]).map(([,x])=>({
+      ts:x[0].ts,open:x[0].open,high:Math.max(...x.map(r=>r.high)),
+      low:Math.min(...x.map(r=>r.low)),close:x.at(-1).close
+    }));
+    return ha(bars);
+  }
   return ha(aggFull(sys.tf)).filter(x=>sess(x.ts)?.s===sys.session);
 }
 
-function events(a){
-  // Frozen 57-59 OPPOSITE logic from the BTCUSD HA backtest:
-  // original BUY -> SELL; original SELL -> BUY.
-  // Structure-reference breaks also reverse the active side.
+function events(a,version){
+  // V2/V3 use the frozen base signal; OPPOSITE reverses entry signals.
   const e=[];let side=null,reference=null;
+  const opposite=version==="57-59-OPPOSITE";
   for(let i=2;i<a.length;i++){
     const c2=a[i-2],c1=a[i-1],c0=a[i];
-    const originalBuy=(c2.ha_close>c2.ha_open)&&(c1.ha_open<c1.ha_high);
-    const originalSell=(c2.ha_close<c2.ha_open)&&(c1.ha_open>c1.ha_low);
-    const oppositeSell=originalBuy;
-    const oppositeBuy=originalSell;
-
-    if(side==="SELL"&&oppositeBuy){
-      e.push({t:c0.ts,s:"BUY",r:"OPPOSITE_SIGNAL"});
-      side="BUY";reference=c1.ha_low;continue;
-    }
-    if(side==="BUY"&&oppositeSell){
+    const baseBuy=(c2.ha_close>c2.ha_open)&&(c1.ha_open<c1.ha_high);
+    const baseSell=(c2.ha_close<c2.ha_open)&&(c1.ha_open>c1.ha_low);
+    const buySignal=opposite?baseSell:baseBuy;
+    const sellSignal=opposite?baseBuy:baseSell;
+    if(side==="BUY"&&sellSignal){
       e.push({t:c0.ts,s:"SELL",r:"OPPOSITE_SIGNAL"});
       side="SELL";reference=c1.ha_high;continue;
     }
+    if(side==="SELL"&&buySignal){
+      e.push({t:c0.ts,s:"BUY",r:"OPPOSITE_SIGNAL"});
+      side="BUY";reference=c1.ha_low;continue;
+    }
     if(side===null){
-      if(oppositeSell){
-        e.push({t:c0.ts,s:"SELL",r:"NEW_SELL_SIGNAL"});
-        side="SELL";reference=c1.ha_high;continue;
-      }
-      if(oppositeBuy){
+      if(buySignal){
         e.push({t:c0.ts,s:"BUY",r:"NEW_BUY_SIGNAL"});
         side="BUY";reference=c1.ha_low;continue;
       }
+      if(sellSignal){
+        e.push({t:c0.ts,s:"SELL",r:"NEW_SELL_SIGNAL"});
+        side="SELL";reference=c1.ha_high;continue;
+      }
     }
-    if(side==="SELL"){
-      if(c0.ha_high>reference){
-        e.push({t:c0.ts,s:"BUY",r:"REFERENCE_HIGH_BREAK"});
-        side="BUY";reference=c0.ha_low;
-      }else reference=c0.ha_high;
-    }else if(side==="BUY"){
+    if(side==="BUY"){
       if(c0.ha_low<reference){
         e.push({t:c0.ts,s:"SELL",r:"REFERENCE_LOW_BREAK"});
         side="SELL";reference=c0.ha_high;
       }else reference=c0.ha_low;
+    }else if(side==="SELL"){
+      if(c0.ha_high>reference){
+        e.push({t:c0.ts,s:"BUY",r:"REFERENCE_HIGH_BREAK"});
+        side="BUY";reference=c0.ha_low;
+      }else reference=c0.ha_high;
     }
   }
   return e;
@@ -367,7 +383,7 @@ function processMinute(c){
         console.log(`[MFP 4TF WAIT] ${sys.id} candles=${a.length} need=3`);
         continue;
       }
-      const e=events(a).at(-1);
+      const e=events(a,sys.version).at(-1);
       console.log(`[MFP 4TF EVAL] ${sys.id} candleTs=${latest?.ts??""} eventTs=${e?.t??""} event=${e?.s??"NONE"} reason=${e?.r??""}`);
       if(!e)continue;
       if(e.t!==latest.ts)continue;
@@ -381,7 +397,7 @@ function processMinute(c){
 }
 
 if(!key)throw Error("MFP_API_KEY missing");
-console.log("[MFP 4TF BTC STRATEGY] 57-59 OPPOSITE S2: 11M | 13M | 7M | 10M");
+console.log("[MFP BTC STRATEGY] 9 systems: S1 V3-11M/V3-10M/V2-13M | S2 OPP-11M/13M/7M | S3 OPP-15M/V2-10M/V2-9M");
 console.log(`[MFP EXECUTOR] MARKET=${market} LIVE_TRADING=${live} DRY_RUN_ONLY=${dry} USER_LIVE_CONFIRMATION=${liveConfirm} EXECUTION_ENABLED=${executionEnabled}`);
 
 await account();
