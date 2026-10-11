@@ -271,7 +271,7 @@ async function openUnlocked(sys,side,t){
   const deadline=Date.now()+FILL_CONFIRM_MS;
   while(Date.now()<deadline){
     try{
-      const ps=u(await client.listOpenPositions({account_id:accountId}));
+      const ps=u(await listPositions(accountId));
       const arr=Array.isArray(ps)?ps:ps?.data||[];
       const p=arr.find(x=>{
         const m=String(v(x,["market_id","marketId","market","symbol","ticker"])||"").toUpperCase();
