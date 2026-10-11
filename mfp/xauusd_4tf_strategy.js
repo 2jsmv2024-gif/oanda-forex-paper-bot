@@ -59,6 +59,7 @@ const FILL_CONFIRM_MS=15000;
 const FILL_POLL_MS=500;
 const ORDER_COOLDOWN_RETRY_MS=5000;
 const ORDER_COOLDOWN_RETRIES=3;
+const MAX_PAIR_EXPOSURE_USD=+(process.env.MFP_MAX_PAIR_EXPOSURE_USD||"500000");
 const PORTFOLIO_TOTAL_MARGIN=+(process.env.MFP_BASE_BALANCE||"500000");
 const PORTFOLIO_MARGIN_PER_TF=+(process.env.MFP_BASE_SIZE_ANCHOR||String(PORTFOLIO_TOTAL_MARGIN/2));
 const PORTFOLIO_MAX_POSITIONS=2;
@@ -199,7 +200,15 @@ async function portfolioOrderSize(accountId,sys,side){
   console.log(`[MFP FIXED QTY] ${sys.id} ${side} qty=${orderQty} leverage=${lev}`);
   return orderQty;
 }
-async function open(sys,side,t){
+let orderQueue=Promise.resolve();
+function open(sys,side,t){
+  const run=()=>openUnlocked(sys,side,t);
+  const next=orderQueue.then(run,run);
+  orderQueue=next.catch(()=>{});
+  return next;
+}
+
+async function openUnlocked(sys,side,t){
   // FIRE IMMEDIATELY: createOrder() is the first broker execution call after
   // a valid signal. Quantity may be reduced to the market minimum only when
   // the configured quantity is invalid; never block a valid signal merely
@@ -210,12 +219,48 @@ async function open(sys,side,t){
   }
 
   const accountId=await account();
-  // Prefer configured quantity. If it is invalid, use the resolved market's
-  // minimum size so the strategy can still exercise its execution path.
+  // Enforce the user's hard per-market notional ceiling before every entry.
+  // Serialize entry requests so simultaneous timeframe signals cannot all pass
+  // the same stale exposure check.
+  if(!Number.isFinite(MAX_PAIR_EXPOSURE_USD)||MAX_PAIR_EXPOSURE_USD<=0){
+    console.error(`[MFP EXPOSURE BLOCK] invalid MFP_MAX_PAIR_EXPOSURE_USD=${MAX_PAIR_EXPOSURE_USD}`);
+    return null;
+  }
   const marketMin=Math.max(0.0001,+(v(mi||{},["min_size","minSize"])||0.0001));
   const orderQty=(Number.isFinite(qty)&&qty>0)?qty:marketMin;
+  const price=+(cur?.close||0);
+  if(!Number.isFinite(price)||price<=0){
+    console.error(`[MFP EXPOSURE BLOCK] ${sys.id} no valid current price; refusing entry`);
+    return null;
+  }
+  const ps=u(await client.listOpenPositions({account_id:accountId}));
+  const openPositions=Array.isArray(ps)?ps:(ps?.data||[]);
+  let currentExposure=0;
+  for(const p of openPositions){
+    const pm=String(v(p,["market_id","marketId","market","symbol","ticker","coin"])||"").toUpperCase();
+    const sameMarket=pm===String(orderMarket).toUpperCase()
+      || pm===String(market).toUpperCase()
+      || (pm.includes("BTC") && String(market).toUpperCase().includes("BTC"));
+    if(!sameMarket)continue;
+    const directNotional=+(v(p,["notional_usd","notionalUsd","value_usd","valueUsd","position_value","positionValue","market_value","marketValue"])||0);
+    const size=Math.abs(+(v(p,["size","quantity","qty","position_size","positionSize"])||0));
+    const pPrice=+(v(p,["mark_price","markPrice","price","entry_price","entryPrice"])||price);
+    const notional=directNotional>0?directNotional:size*pPrice;
+    if(!Number.isFinite(notional)||notional<0 || (size>0 && notional===0)){
+      console.error(`[MFP EXPOSURE BLOCK] ${sys.id} cannot reliably value an existing BTC position; refusing new exposure`);
+      return null;
+    }
+    currentExposure+=notional;
+  }
+  const newNotional=orderQty*price*+(v(mi||{},["contract_size","contractSize"])||1);
+  const projectedExposure=currentExposure+newNotional;
+  console.log(`[MFP EXPOSURE CHECK] ${sys.id} market=${orderMarket} existingUsd=${currentExposure.toFixed(2)} newOrderUsd=${newNotional.toFixed(2)} projectedUsd=${projectedExposure.toFixed(2)} capUsd=${MAX_PAIR_EXPOSURE_USD.toFixed(2)}`);
+  if(projectedExposure>MAX_PAIR_EXPOSURE_USD){
+    console.error(`[MFP EXPOSURE BLOCK] ${sys.id} projected exposure ${projectedExposure.toFixed(2)} exceeds cap ${MAX_PAIR_EXPOSURE_USD.toFixed(2)}; no order sent`);
+    return null;
+  }
   console.log(`[MFP FIXED QTY] ${sys.id} ${side} qty=${orderQty} leverage=${lev}`);
-  const expected=cur?.close||undefined;
+  const expected=price;
   let r;
   let attempt=0;
   while(true){
@@ -393,6 +438,7 @@ if(!mi){
 orderMarket=v(mi,["market_id","marketId","id"])||market;
 console.log("[MFP MARKET META] "+JSON.stringify(mi).slice(0,5000));
 console.log("[MFP ORDER MARKET] "+orderMarket);
+console.log("[MFP EXPOSURE LIMIT] max_pair_exposure_usd="+MAX_PAIR_EXPOSURE_USD);
 const streamSymbol=v(mi,["coin","stream_symbol","symbol","market_symbol","ticker","name"]);
 if(!streamSymbol)throw Error("MFP stream symbol unavailable");
 console.log("[MFP MARKET] market_id="+market+" stream symbol="+streamSymbol);
@@ -400,7 +446,7 @@ console.log("[MFP MARKET] market_id="+market+" stream symbol="+streamSymbol);
 while(true){
   try{
     const stream=new PriceStream({symbols:[streamSymbol]});
-    console.log("[MFP STREAM] Binance BTC connected");
+    console.log("[MFP STREAM] MFP SDK market stream connected source="+(v(mi||{},["provider","source_venue","sourceVenue"])||"unknown")+" symbol="+streamSymbol);
     for await(const t of stream){
       const p=+v(t,["price","mid","mark"]);
       if(!Number.isFinite(p))continue;
