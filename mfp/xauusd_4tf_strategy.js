@@ -1,6 +1,6 @@
 import {PriceStream} from "@myfundedperps/sdk";
 
-// MFP REST executor; same frozen BTC signal conditions, using the XAU market feed.
+// MFP REST executor; same frozen BTC signal conditions, using the XAUUSD market feed.
 
 const key=(process.env.MFP_API_KEY||"").trim();
 let market=process.env.MFP_MARKET_ID||"hyperliquid|xyz:GOLD";
@@ -193,9 +193,9 @@ async function account(){
   throw Error("MFP account mismatch: configured="+(configured||"<missing>")+" returned=["+ids.join(",")+"] ; refusing ambiguous account selection");
 }
 async function portfolioOrderSize(accountId,sys,side){
-  // FIX: use the configured XAU quantity instead of deriving a huge
+  // FIX: use the configured XAUUSD quantity instead of deriving a huge
   // margin-based size from the competition balance. The previous calculation
-  // produced 121-607+ XAU orders and those were rejected by MFP trading rules.
+  // produced 121-607+ XAUUSD orders and those were rejected by MFP trading rules.
   // Keep the strategy/signals unchanged; only execution sizing is corrected.
   const orderQty=qty;
   if(!Number.isFinite(orderQty)||orderQty<=0){
@@ -252,7 +252,7 @@ async function openUnlocked(sys,side,t){
     const pPrice=+(v(p,["mark_price","markPrice","price","entry_price","entryPrice"])||price);
     const notional=directNotional>0?directNotional:size*pPrice;
     if(!Number.isFinite(notional)||notional<0 || (size>0 && notional===0)){
-      console.error(`[MFP EXPOSURE BLOCK] ${sys.id} cannot reliably value an existing XAU position; refusing new exposure`);
+      console.error(`[MFP EXPOSURE BLOCK] ${sys.id} cannot reliably value an existing XAUUSD position; refusing new exposure`);
       return null;
     }
     currentExposure+=notional;
@@ -397,7 +397,7 @@ function processMinute(c){
 }
 
 if(!key)throw Error("MFP_API_KEY missing");
-console.log("[MFP XAU STRATEGY — BTC CONDITIONS] 9 systems: S1 V3-11M/V3-10M/V2-13M | S2 OPP-11M/13M/7M | S3 OPP-15M/V2-10M/V2-9M");
+console.log("[MFP XAUUSD STRATEGY — BTC CONDITIONS] 9 systems: S1 V3-11M/V3-10M/V2-13M | S2 OPP-11M/13M/7M | S3 OPP-15M/V2-10M/V2-9M");
 console.log(`[MFP EXECUTOR] MARKET=${market} LIVE_TRADING=${live} DRY_RUN_ONLY=${dry} USER_LIVE_CONFIRMATION=${liveConfirm} EXECUTION_ENABLED=${executionEnabled}`);
 
 await account();
@@ -428,9 +428,9 @@ if(!mi){
   if(firstMarket){
     market=firstMarket.id;
     mi=firstMarket.meta;
-    console.error("[MFP XAU MARKET NO TRADEABLE CANDIDATE] selected="+market+" trading_enabled="+mi?.trading_enabled+" reduce_only="+mi?.reduce_only);
+    console.error("[MFP XAUUSD MARKET NO TRADEABLE CANDIDATE] selected="+market+" trading_enabled="+mi?.trading_enabled+" reduce_only="+mi?.reduce_only);
   }else{
-    throw Error("XAU market could not be resolved");
+    throw Error("XAUUSD market could not be resolved");
   }
 }
 orderMarket=v(mi,["market_id","marketId","id"])||market;
@@ -438,7 +438,7 @@ console.log("[MFP MARKET META] "+JSON.stringify(mi).slice(0,5000));
 console.log("[MFP ORDER MARKET] "+orderMarket);
 console.log("[MFP EXPOSURE LIMIT] max_pair_exposure_usd="+MAX_PAIR_EXPOSURE_USD);
 const streamSymbol=String(v(mi,["coin","stream_symbol","symbol","market_symbol","ticker"])||"xyz:GOLD");
-if(!streamSymbol) throw Error("MFP GOLD stream symbol unavailable");
+if(!streamSymbol) throw Error("MFP XAUUSD stream symbol unavailable");
 let lastTickAt=0;
 let lastPrice=0;
 function acceptPrice(p,tsRaw){
@@ -454,7 +454,7 @@ function acceptPrice(p,tsRaw){
   return true;
 }
 async function fallbackPoll(){
-  console.error("[MFP FEED] No XAU SDK ticks; refusing to substitute a different asset feed.");
+  console.error("[MFP FEED] No XAUUSD SDK ticks; refusing to substitute a different asset feed.");
   while(true) await new Promise(r=>setTimeout(r,15000));
 }
 async function streamLoop(){
