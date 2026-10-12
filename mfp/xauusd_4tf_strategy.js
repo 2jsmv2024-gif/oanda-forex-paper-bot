@@ -1,6 +1,6 @@
 import {PriceStream} from "@myfundedperps/sdk";
 
-// MFP REST executor; same frozen BTC signal conditions, using the GOLD market feed.
+// MFP REST executor; same frozen BTC signal conditions, using the XAU market feed.
 
 const key=(process.env.MFP_API_KEY||"").trim();
 let market=process.env.MFP_MARKET_ID||"hyperliquid|xyz:GOLD";
@@ -193,9 +193,9 @@ async function account(){
   throw Error("MFP account mismatch: configured="+(configured||"<missing>")+" returned=["+ids.join(",")+"] ; refusing ambiguous account selection");
 }
 async function portfolioOrderSize(accountId,sys,side){
-  // FIX: use the configured GOLD quantity instead of deriving a huge
+  // FIX: use the configured XAU quantity instead of deriving a huge
   // margin-based size from the competition balance. The previous calculation
-  // produced 121-607+ GOLD orders and those were rejected by MFP trading rules.
+  // produced 121-607+ XAU orders and those were rejected by MFP trading rules.
   // Keep the strategy/signals unchanged; only execution sizing is corrected.
   const orderQty=qty;
   if(!Number.isFinite(orderQty)||orderQty<=0){
@@ -252,7 +252,7 @@ async function openUnlocked(sys,side,t){
     const pPrice=+(v(p,["mark_price","markPrice","price","entry_price","entryPrice"])||price);
     const notional=directNotional>0?directNotional:size*pPrice;
     if(!Number.isFinite(notional)||notional<0 || (size>0 && notional===0)){
-      console.error(`[MFP EXPOSURE BLOCK] ${sys.id} cannot reliably value an existing GOLD position; refusing new exposure`);
+      console.error(`[MFP EXPOSURE BLOCK] ${sys.id} cannot reliably value an existing XAU position; refusing new exposure`);
       return null;
     }
     currentExposure+=notional;
@@ -270,7 +270,7 @@ async function openUnlocked(sys,side,t){
   let attempt=0;
   while(true){
     try{
-      const clientOrderId=("gold4tf:"+sys.id+":"+t+":"+side).slice(0,128);
+      const clientOrderId=("xau4tf:"+sys.id+":"+t+":"+side).slice(0,128);
       r=await placeOrder({client_order_id:clientOrderId,account_id:accountId,market_id:orderMarket,side:side.toLowerCase(),type:"market",size:orderQty,leverage:lev,margin_mode:"isolated",expected_price:expected},clientOrderId);
       break;
     }catch(e){
@@ -339,7 +339,7 @@ async function closeSystem(sys,side){
     const closeSide=pside.includes("short")?"buy":"sell";
     const size=Math.abs(+(v(p,["size","quantity","qty","position_size","positionSize"])||0));
     if(size){
-      const closeKey=("gold4tf-close:"+sys.id+":"+Date.now()).slice(0,128);
+      const closeKey=("xau4tf-close:"+sys.id+":"+Date.now()).slice(0,128);
       await closePosition(tracked.id,{client_order_id:closeKey,type:"market",size,expected_price:cur?.close||undefined},closeKey);
     }
   }
@@ -397,7 +397,7 @@ function processMinute(c){
 }
 
 if(!key)throw Error("MFP_API_KEY missing");
-console.log("[MFP GOLD STRATEGY — BTC CONDITIONS] 9 systems: S1 V3-11M/V3-10M/V2-13M | S2 OPP-11M/13M/7M | S3 OPP-15M/V2-10M/V2-9M");
+console.log("[MFP XAU STRATEGY — BTC CONDITIONS] 9 systems: S1 V3-11M/V3-10M/V2-13M | S2 OPP-11M/13M/7M | S3 OPP-15M/V2-10M/V2-9M");
 console.log(`[MFP EXECUTOR] MARKET=${market} LIVE_TRADING=${live} DRY_RUN_ONLY=${dry} USER_LIVE_CONFIRMATION=${liveConfirm} EXECUTION_ENABLED=${executionEnabled}`);
 
 await account();
@@ -428,9 +428,9 @@ if(!mi){
   if(firstMarket){
     market=firstMarket.id;
     mi=firstMarket.meta;
-    console.error("[MFP GOLD MARKET NO TRADEABLE CANDIDATE] selected="+market+" trading_enabled="+mi?.trading_enabled+" reduce_only="+mi?.reduce_only);
+    console.error("[MFP XAU MARKET NO TRADEABLE CANDIDATE] selected="+market+" trading_enabled="+mi?.trading_enabled+" reduce_only="+mi?.reduce_only);
   }else{
-    throw Error("GOLD market could not be resolved");
+    throw Error("XAU market could not be resolved");
   }
 }
 orderMarket=v(mi,["market_id","marketId","id"])||market;
@@ -454,7 +454,7 @@ function acceptPrice(p,tsRaw){
   return true;
 }
 async function fallbackPoll(){
-  console.error("[MFP FEED] No GOLD SDK ticks; refusing to substitute a different asset feed.");
+  console.error("[MFP FEED] No XAU SDK ticks; refusing to substitute a different asset feed.");
   while(true) await new Promise(r=>setTimeout(r,15000));
 }
 async function streamLoop(){
