@@ -3,4 +3,4 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev
 COPY . .
-CMD ["node","executor.js"]
+CMD ["node", "xauusd_4tf_strategy.js"]
