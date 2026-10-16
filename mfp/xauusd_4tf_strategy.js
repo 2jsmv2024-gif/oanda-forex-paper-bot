@@ -403,20 +403,33 @@ console.log(`[MFP EXECUTOR] MARKET=${market} LIVE_TRADING=${live} DRY_RUN_ONLY=$
 await account();
 console.log("[MFP AUTH] authenticated; account ready");
 
+// The chart shows XAU-USD perpetual on Binance. Resolve the MFP execution ID
+// and the SDK stream symbol from the same market metadata; never silently fall
+// back to Hyperliquid or another venue.
 const marketCandidates=[
-  market,
-  "hyperliquid|xyz:GOLD"
+  "binance|XAU",
+  "binance|XAU-USD",
+  "binance|XAUUSD",
+  "XAU-USD",
+  market
 ];
 let mi=null;
-let firstMarket=null;
-for(const candidate of [...new Set(marketCandidates)]){
+const seenMarketIds=new Set();
+for(const candidate of marketCandidates){
+  if(!candidate||seenMarketIds.has(candidate))continue;
+  seenMarketIds.add(candidate);
   try{
     const test=u(await getMarket(candidate));
     if(!test)continue;
-    console.log("[MFP MARKET PROBE] "+candidate+" trading_enabled="+test?.trading_enabled+" reduce_only="+test?.reduce_only+" coin="+(v(test,["coin","stream_symbol","symbol","market_symbol","ticker","name"])||""));
-    if(!firstMarket)firstMarket={id:candidate,meta:test};
+    const metaText=JSON.stringify(test).toLowerCase();
+    const venueText=String(v(test,["venue","exchange","provider","source","market_id","marketId","id"])||candidate).toLowerCase();
+    const symbolText=String(v(test,["coin","stream_symbol","symbol","market_symbol","ticker","name","display_name"])||"").toUpperCase();
+    const isXau=symbolText.includes("XAU") || metaText.includes("xau-usd") || metaText.includes("xau/usd");
+    const isBinance=venueText.includes("binance") || candidate.toLowerCase().startsWith("binance|");
+    console.log("[MFP MARKET PROBE] candidate="+candidate+" venueBinance="+isBinance+" isXAU="+isXau+" trading_enabled="+test?.trading_enabled+" reduce_only="+test?.reduce_only+" symbol="+symbolText);
+    if(!isXau || !isBinance)continue;
     if(test?.trading_enabled===true && test?.reduce_only!==true){
-      market=candidate;
+      market=String(v(test,["market_id","marketId","id"])||candidate);
       mi=test;
       break;
     }
@@ -425,20 +438,14 @@ for(const candidate of [...new Set(marketCandidates)]){
   }
 }
 if(!mi){
-  if(firstMarket){
-    market=firstMarket.id;
-    mi=firstMarket.meta;
-    console.error("[MFP XAU-USD MARKET NO TRADEABLE CANDIDATE] selected="+market+" trading_enabled="+mi?.trading_enabled+" reduce_only="+mi?.reduce_only);
-  }else{
-    throw Error("XAU-USD market could not be resolved");
-  }
+  throw Error("No confirmed tradeable Binance XAU-USD market found. Orders remain blocked; check MFP market IDs/venue metadata.");
 }
-orderMarket=v(mi,["market_id","marketId","id"])||market;
+orderMarket=String(v(mi,["market_id","marketId","id"])||market);
 console.log("[MFP MARKET META] "+JSON.stringify(mi).slice(0,5000));
 console.log("[MFP ORDER MARKET] "+orderMarket);
 console.log("[MFP EXPOSURE LIMIT] max_pair_exposure_usd="+MAX_PAIR_EXPOSURE_USD);
-const streamSymbol=String(v(mi,["coin","stream_symbol","symbol","market_symbol","ticker"])||"xyz:GOLD");
-if(!streamSymbol) throw Error("MFP XAU-USD stream symbol unavailable");
+const streamSymbol=String(v(mi,["coin","stream_symbol","symbol","market_symbol","ticker"])||"");
+if(!streamSymbol) throw Error("MFP Binance XAU-USD stream symbol unavailable; orders remain blocked");
 let lastTickAt=0;
 let lastPrice=0;
 function acceptPrice(p,tsRaw){
