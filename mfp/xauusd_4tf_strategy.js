@@ -322,7 +322,7 @@ async function openUnlocked(sys,side,t){
         const pside=String(v(x,["side","position_side","positionSide"])||"").toLowerCase();
         const isBuyPosition=pside.includes("long")||pside.includes("buy");
         const isSellPosition=pside.includes("short")||pside.includes("sell");
-        return (m===String(market).toUpperCase()||m.includes("BTC")||m.includes("xyz:GOLD")) &&
+        return (m===String(orderMarket).toUpperCase()||m===String(market).toUpperCase()||m.includes("XAUUSDT")||m.includes("BINANCE|XAUUSDT")) &&
           ((side==="BUY"&&isBuyPosition)||(side==="SELL"&&isSellPosition));
       });
       if(p){
