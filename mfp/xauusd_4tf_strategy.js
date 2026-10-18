@@ -1,4 +1,5 @@
 import {PriceStream} from "@myfundedperps/sdk";
+import {createServer} from "node:http";
 
 // MFP REST executor; same frozen BTC signal conditions, using the XAU-USD market feed.
 
@@ -40,6 +41,19 @@ const MAX_PAIR_EXPOSURE_USD=+(process.env.MFP_MAX_PAIR_EXPOSURE_USD||"500000");
 const PORTFOLIO_TOTAL_MARGIN=+(process.env.MFP_BASE_BALANCE||"500000");
 const PORTFOLIO_MARGIN_PER_TF=+(process.env.MFP_BASE_SIZE_ANCHOR||String(PORTFOLIO_TOTAL_MARGIN/2));
 const PORTFOLIO_MAX_POSITIONS=2;
+
+// Railway health endpoint: report process health separately from trading readiness.
+let marketReady=false;
+let feedReady=false;
+let lastHealthTickAt=0;
+const healthServer=createServer((req,res)=>{
+  if(req.url==="/health" || req.url==="/health/ready"){
+    const body=JSON.stringify({ok:true,service:"mfp-xauusd-4tf",marketReady,feedReady,lastTickAt:lastHealthTickAt||null,executionEnabled});
+    res.writeHead(200,{"content-type":"application/json","cache-control":"no-store"});res.end(body);return;
+  }
+  res.writeHead(404,{"content-type":"application/json"});res.end(JSON.stringify({error:"not_found"}));
+});
+healthServer.listen(+(process.env.PORT||8080),"0.0.0.0",()=>console.log("[HEALTH] listening port="+(process.env.PORT||8080)));
 
 const SYSTEMS=[
   {id:"V3-S1-11M",version:"V3",session:"S1",tf:11},
@@ -218,8 +232,8 @@ async function openUnlocked(sys,side,t){
   // a valid signal. Quantity may be reduced to the market minimum only when
   // the configured quantity is invalid; never block a valid signal merely
   // because the preferred size is unavailable.
-  if(!executionEnabled){
-    console.log(`[MFP DRY SIGNAL] ${sys.id} ${side} executionEnabled=${executionEnabled}`);
+  if(!executionEnabled || !marketReady || !mi){
+    console.log(`[MFP EXECUTION BLOCK] ${sys.id} ${side} executionEnabled=${executionEnabled} marketReady=${marketReady} marketMetadata=${!!mi}`);
     return null;
   }
 
@@ -444,8 +458,10 @@ try{
   console.error("[MFP MARKET LIST ERROR] "+(e?.message||e));
 }
 if(!mi){
-  throw Error("No confirmed tradeable Binance XAU-USD market found in MFP market catalogue. Orders remain blocked; inspect market-list logs.");
+  console.error("[MFP MARKET NOT READY] No confirmed tradeable Binance XAU-USD market found. Executor remains online but ALL new entries are blocked.");
+  await new Promise(()=>{});
 }
+marketReady=true;
 orderMarket=String(v(mi,["market_id","marketId","id"])||market);
 console.log("[MFP MARKET META] "+JSON.stringify(mi).slice(0,5000));
 console.log("[MFP ORDER MARKET] "+orderMarket);
@@ -463,7 +479,7 @@ function acceptPrice(p,tsRaw){
   const m=Math.floor(ts/60000)*60000;
   if(!cur||cur.ts!==m)processMinute({ts:m,open:p,high:p,low:p,close:p});
   else processMinute({ts:m,open:cur.open,high:Math.max(cur.high,p),low:Math.min(cur.low,p),close:p});
-  lastTickAt=Date.now();lastPrice=p;
+  lastTickAt=Date.now();lastHealthTickAt=lastTickAt;feedReady=true;lastPrice=p;
   return true;
 }
 async function fallbackPoll(){
