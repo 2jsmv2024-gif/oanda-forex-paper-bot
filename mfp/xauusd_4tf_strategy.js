@@ -126,7 +126,7 @@ function ha(a){
 function dataFor(sys){
   // Match the saved backtest's engine-specific pipeline.
   if(sys.version==="V2"){
-    const sessionRaw=raw.filter(r=>sess(r.ts)?.s===sys.session);
+    const sessionRaw=raw;
     const by=new Map();
     for(const r of sessionRaw){
       const k=Math.floor(r.ts/60000/sys.tf)*sys.tf;
@@ -139,7 +139,7 @@ function dataFor(sys){
     }));
     return ha(bars);
   }
-  return ha(aggFull(sys.tf)).filter(x=>sess(x.ts)?.s===sys.session);
+  return ha(aggFull(sys.tf));
 }
 
 function events(a,version){
@@ -383,15 +383,11 @@ async function handle(sys,event){
 }
 
 function processMinute(c){
-  const ss=sess(c.ts);
   if(!cur||Math.floor(c.ts/60000)!==Math.floor(cur.ts/60000)){
     if(cur)raw.push(cur);
     raw=raw.slice(-10000);
     cur={...c};
-    if(!ss)return;
-
     for(const sys of SYSTEMS){
-      if(sys.session!==ss.s)continue;
       const a=dataFor(sys);
       const latest=a.at(-1);
       if(a.length<3){
