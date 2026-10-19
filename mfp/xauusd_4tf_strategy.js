@@ -182,7 +182,8 @@ function events(a,version){
       }else reference=c0.ha_high;
     }
   }
-  return e;
+  // Direction-only inversion: preserve every signal timestamp and strategy condition.
+  return e.map(event=>({...event,s:event.s==="BUY"?"SELL":"BUY"}));
 }
 
 async function account(){
