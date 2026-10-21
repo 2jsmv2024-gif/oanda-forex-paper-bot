@@ -5,13 +5,13 @@ set -Eeuo pipefail
 : "${COPIER_TOKEN:?Existing Railway COPIER_TOKEN must remain configured}"
 PORT="${PORT:-8080}"
 DATA_DIR="${DATA_DIR:-/data}"
-WINEPREFIX="${WINEPREFIX:-/tmp/wineprefix}"
+WINEPREFIX="${WINEPREFIX:-/data/wineprefix}"
 export DATA_DIR WINEPREFIX WINEARCH=win64 DISPLAY=:0 HOME=/root WINEDEBUG=-all
 
-INSTALL_DIR="/tmp/mt5-install"
-MASTER_DIR="/tmp/mt5-master"
-SLAVE_DIR="/tmp/mt5-slave"
-INSTALLER="/tmp/mt5setup.exe"
+INSTALL_DIR="$DATA_DIR/mt5-install"
+MASTER_DIR="$DATA_DIR/mt5-master"
+SLAVE_DIR="$DATA_DIR/mt5-slave"
+INSTALLER="$DATA_DIR/mt5setup.exe"
 PASSFILE="$DATA_DIR/.vnc-pass"
 
 mkdir -p "$DATA_DIR" "$INSTALL_DIR" /tmp/.X11-unix
@@ -52,7 +52,7 @@ fi
 if [ ! -f "$INSTALL_DIR/terminal64.exe" ]; then
   echo "Downloading official MetaTrader 5 installer."
   wget -q --show-progress -O "$INSTALLER" "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
-  wine "$INSTALLER" /auto "/path:Z:\\tmp\\mt5-install" >/tmp/mt5-installer.log 2>&1 || true
+  wine "$INSTALLER" /auto "/path:Z:\\data\\mt5-install" >/data/mt5-installer.log 2>&1 || true
   for i in $(seq 1 180); do
     [ -f "$INSTALL_DIR/terminal64.exe" ] && break
     sleep 5
@@ -61,7 +61,7 @@ fi
 
 if [ ! -f "$INSTALL_DIR/terminal64.exe" ]; then
   echo "ERROR: MT5 installer did not create $INSTALL_DIR/terminal64.exe."
-  tail -n 100 /tmp/mt5-installer.log 2>/dev/null || true
+  tail -n 100 /data/mt5-installer.log 2>/dev/null || true
   exit 1
 fi
 
@@ -75,11 +75,11 @@ if [ ! -f "$SLAVE_DIR/terminal64.exe" ]; then
 fi
 
 echo "Starting MT5 MASTER terminal (separate portable folder)."
-wine "$MASTER_DIR/terminal64.exe" /portable >/tmp/mt5-master.log 2>&1 &
+wine "$MASTER_DIR/terminal64.exe" /portable >/data/mt5-master.log 2>&1 &
 MASTER_PID=$!
 sleep 8
 echo "Starting MT5 REVERSE SLAVE terminal (separate portable folder)."
-wine "$SLAVE_DIR/terminal64.exe" /portable >/tmp/mt5-slave.log 2>&1 &
+wine "$SLAVE_DIR/terminal64.exe" /portable >/data/mt5-slave.log 2>&1 &
 SLAVE_PID=$!
 
 echo "MT5 Master and Slave terminals launched. Open /vnc.html?autoconnect=1&resize=remote&path=websockify"
