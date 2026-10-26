@@ -11,6 +11,8 @@ const lev=+(process.env.MFP_LEVERAGE||"5");
 const live=(process.env.LIVE_TRADING||"false").toLowerCase()==="true";
 const dry=(process.env.DRY_RUN_ONLY||"true").toLowerCase()==="true";
 const liveConfirm=(process.env.MFP_USER_LIVE_CONFIRMATION||"").trim()==="YES";
+// Toggle final BUY/SELL inversion from Railway Variables. Default true preserves current behavior.
+const reverseSignals=(process.env.MFP_REVERSE_SIGNALS||"true").trim().toLowerCase()==="true";
 const executionEnabled=live&&!dry&&liveConfirm;
 
 const REST_BASE=(process.env.MFP_REST_BASE_URL||"https://developers.myfundedperpetuals.com/v1").replace(/\/$/,"");
@@ -182,8 +184,8 @@ function events(a,version){
       }else reference=c0.ha_high;
     }
   }
-  // Direction-only inversion: preserve every signal timestamp and strategy condition.
-  return e.map(event=>({...event,s:event.s==="BUY"?"SELL":"BUY"}));
+  // Optional final BUY/SELL inversion; timestamps and signal conditions remain unchanged.
+  return reverseSignals ? e.map(event=>({...event,s:event.s==="BUY"?"SELL":"BUY"})) : e;
 }
 
 async function account(){
@@ -409,7 +411,7 @@ function processMinute(c){
 
 if(!key)throw Error("MFP_API_KEY missing");
 console.log("[MFP XAU-USD STRATEGY — BTC CONDITIONS] 9 systems: S1 V3-11M/V3-10M/V2-13M | S2 OPP-11M/13M/7M | S3 OPP-15M/V2-10M/V2-9M");
-console.log(`[MFP EXECUTOR] MARKET=${market} LIVE_TRADING=${live} DRY_RUN_ONLY=${dry} USER_LIVE_CONFIRMATION=${liveConfirm} EXECUTION_ENABLED=${executionEnabled}`);
+console.log(`[MFP EXECUTOR] MARKET=${market} LIVE_TRADING=${live} DRY_RUN_ONLY=${dry} USER_LIVE_CONFIRMATION=${liveConfirm} EXECUTION_ENABLED=${executionEnabled} REVERSE_SIGNALS=${reverseSignals}`);
 
 await account();
 console.log("[MFP AUTH] authenticated; account ready");
