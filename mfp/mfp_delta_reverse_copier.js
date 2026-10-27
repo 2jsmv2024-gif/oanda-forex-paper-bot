@@ -475,19 +475,19 @@ async function pollOnce() {
       eventCount++;
       const plan = positionPlan(current, "OPEN");
       console.log("[POSITION CHANGE] flat -> " + (currSign > 0 ? "LONG" : "SHORT") + " source net=" + currSize);
-      await copyFill(plan);
+      await copyFill(null, plan);
     } else if (prevSign !== 0 && currSign === 0) {
       eventCount++;
       const plan = positionPlan(previous, "CLOSE");
       console.log("[POSITION CHANGE] " + (prevSign > 0 ? "LONG" : "SHORT") + " -> flat source");
-      await copyFill(plan);
+      await copyFill(null, plan);
     } else if (prevSign !== 0 && currSign !== 0 && prevSign !== currSign) {
       eventCount++;
       const closePlan = positionPlan(previous, "CLOSE");
       const openPlan = positionPlan(current, "OPEN");
       console.log("[POSITION FLIP] source direction changed; dry-run emits close then opposite entry plans");
-      await copyFill(closePlan);
-      await copyFill(openPlan);
+      await copyFill(null, closePlan);
+      await copyFill(null, openPlan);
     } else if (prevSign === currSign && prevSign !== 0 && prevSize !== currSize) {
       console.log("[POSITION SIZE CHANGE] source net changed from " + prevSize + " to " + currSize +
         "; target remains fixed at " + FIXED_CONTRACTS + " contract and no extra entry is planned");
