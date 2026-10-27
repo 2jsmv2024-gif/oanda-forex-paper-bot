@@ -19,7 +19,10 @@ const FIXED_CONTRACTS = Math.max(1, Math.floor(Number(process.env.DELTA_FIXED_CO
 const PRODUCT_ID = Number(process.env.DELTA_PRODUCT_ID || 131253);
 const PRODUCT_SYMBOL = process.env.DELTA_PRODUCT_SYMBOL || "XAUTUSD";
 const STATE_FILE = process.env.COPIER_STATE_PATH || "/data/mfp_delta_reverse_copier_state.json";
-const executionEnabled = !DRY_RUN && LIVE_EXECUTION && LIVE_CONFIRM;
+const executionRequested = !DRY_RUN && LIVE_EXECUTION && LIVE_CONFIRM;
+// This revision is intentionally hard-gated to dry-run while position-transition
+// detection is being validated against the MFP API. Do not enable order submission here.
+const executionEnabled = false;
 const MAX_SEEN = 20000;
 
 let lastPollAt = null;
@@ -28,6 +31,8 @@ let lastError = null;
 let eventCount = 0;
 let polling = false;
 let baselineInitialized = false;
+let sourceSnapshotInitialized = false;
+let lastSourceSnapshot = null;
 let lastDeltaPosition = null;
 let productMeta = null;
 let leverage = null;
@@ -43,6 +48,9 @@ function readState() {
     for (const id of Array.isArray(s.seen) ? s.seen : []) seen.add(String(id));
     for (const id of Array.isArray(s.attempted) ? s.attempted : []) attempted.add(String(id));
     baselineInitialized = s.baselineInitialized === true;
+    sourceSnapshotInitialized = s.sourceSnapshotInitialized === true;
+    lastSourceSnapshot = s.lastSourceSnapshot && typeof s.lastSourceSnapshot === "object"
+      ? s.lastSourceSnapshot : null;
   } catch {}
 }
 function saveState() {
@@ -50,6 +58,8 @@ function saveState() {
   fs.mkdirSync(dir, { recursive: true });
   const payload = {
     baselineInitialized,
+    sourceSnapshotInitialized,
+    lastSourceSnapshot,
     seen: [...seen].slice(-MAX_SEEN),
     attempted: [...attempted].slice(-MAX_SEEN),
     savedAt: new Date().toISOString()
@@ -98,6 +108,64 @@ function closeFill(fill) {
 function deltaSymbolFor(fill) {
   const raw = String(first(fill, ["market_id", "marketId", "symbol", "product_symbol", "productSymbol", "ticker", "market"]) || "").trim();
   return mapping[raw] || mapping[raw.toUpperCase()] || null;
+}
+function positionRowsOf(value) {
+  if (Array.isArray(value)) return value;
+  if (Array.isArray(value && value.positions)) return value.positions;
+  if (Array.isArray(value && value.data)) return value.data;
+  if (Array.isArray(value && value.results)) return value.results;
+  if (Array.isArray(value && value.items)) return value.items;
+  if (value && value.data && typeof value.data === "object") return positionRowsOf(value.data);
+  if (value && value.result && typeof value.result === "object") return positionRowsOf(value.result);
+  return [];
+}
+function buildSourcePositionSnapshot(response) {
+  const rows = positionRowsOf(response);
+  const relevant = [];
+  let signed = 0;
+  for (const row of rows) {
+    const status = String(first(row, ["status", "position_status", "positionStatus"]) || "open").toLowerCase();
+    if (status && !["open", "active"].includes(status)) continue;
+    const rawMarket = String(first(row, ["market_id", "marketId", "symbol", "product_symbol", "productSymbol", "ticker", "market"]) || "").trim();
+    const target = mapping[rawMarket] || mapping[rawMarket.toUpperCase()] || null;
+    if (target !== PRODUCT_SYMBOL) continue;
+    const side = normalSide(first(row, ["side", "position_side", "positionSide", "direction"]));
+    const size = Number(first(row, ["size", "quantity", "qty", "position_size", "positionSize"]));
+    if (!side || !(Number.isFinite(size) && size > 0)) continue;
+    const id = String(first(row, ["position_id", "positionId", "id"]) || "");
+    const signedSize = side === "BUY" ? size : -size;
+    signed += signedSize;
+    relevant.push({ id, side, size, market: rawMarket });
+  }
+  const rounded = Math.round(signed * 1e8) / 1e8;
+  relevant.sort((a, b) => a.id.localeCompare(b.id));
+  return {
+    signedSize: rounded,
+    positionCount: relevant.length,
+    signature: relevant.map(p => [p.id, p.side, p.size, p.market].join(":")).join("|"),
+    updatedAt: new Date().toISOString()
+  };
+}
+function positionPlan(snapshot, transition) {
+  const sourceSide = snapshot.signedSize > 0 ? "BUY" : "SELL";
+  const isClose = transition === "CLOSE";
+  const plannedDeltaSide = isClose ? sourceSide : reverseSide(sourceSide);
+  const digest = crypto.createHash("sha256")
+    .update(transition + "|" + snapshot.signature + "|" + snapshot.signedSize + "|" + String(snapshot.updatedAt))
+    .digest("hex").slice(0, 20);
+  return {
+    id: "mfp-position-" + transition.toLowerCase() + ":" + digest,
+    sourceSide,
+    plannedDeltaSide,
+    sourceMarket: "binance|XAUUSDT",
+    deltaProduct: PRODUCT_SYMBOL,
+    sourceSize: Math.abs(snapshot.signedSize),
+    deltaContracts: FIXED_CONTRACTS,
+    isClose,
+    sourceClientOrderId: null,
+    sourceTimestamp: snapshot.updatedAt,
+    policy: "dry-run position snapshot transition; fixed Delta size; does not infer MFP filled_size"
+  };
 }
 function mfpGet(endpoint) {
   if (!MFP_KEY) throw new Error("MFP_API_KEY missing in copier service variables");
@@ -378,52 +446,61 @@ async function pollOnce() {
   try {
     if (!MFP_KEY) throw new Error("MFP_API_KEY missing in copier service variables");
     if (!ACCOUNT_ID) throw new Error("MFP_ACCOUNT_ID missing in copier service variables");
-    const response = await mfpGet("/fills?account_id=" + encodeURIComponent(ACCOUNT_ID) + "&limit=100");
-    const fills = rowsOf(response).slice().sort((a, b) => fillTime(a) - fillTime(b));
-    if (!baselineInitialized) {
-      for (const fill of fills) {
-        const id = stableOrderKey(fill);
-        if (id) seen.add(id);
-      }
-      baselineInitialized = true;
+    if (executionRequested) {
+      console.error("[LIVE BLOCKED] This revision is hard-gated to dry-run while position-transition detection is being validated.");
+    }
+    const response = await mfpGet("/positions?account_id=" + encodeURIComponent(ACCOUNT_ID) + "&status=open&limit=100");
+    const current = buildSourcePositionSnapshot(response);
+    if (!sourceSnapshotInitialized || !lastSourceSnapshot) {
+      lastSourceSnapshot = current;
+      sourceSnapshotInitialized = true;
       saveState();
       lastSuccessAt = new Date().toISOString();
       lastError = null;
-      console.log("[BASELINE] marked " + fills.length + " existing MFP fills as seen; no historical orders replayed");
+      console.log("[POSITION BASELINE] openGoldPositions=" + current.positionCount +
+        " netSourceSize=" + current.signedSize +
+        " netSide=" + (current.signedSize > 0 ? "LONG" : current.signedSize < 0 ? "SHORT" : "FLAT") +
+        "; existing position not copied");
+      console.log("[POLL OK] mode=DRY_RUN source=positions deltaProduct=" + PRODUCT_SYMBOL);
       return;
     }
-    if (executionEnabled) await preflightDelta();
-    for (const fill of fills) {
-      const id = stableOrderKey(fill);
-      if (!id || seen.has(id) || attempted.has(id)) continue;
-      const plan = describeFill(fill);
-      // Reserve the source event before processing so restarts cannot duplicate a POST.
-      seen.add(id);
-      attempted.add(id);
-      saveState();
+
+    const previous = lastSourceSnapshot;
+    const prevSize = Number(previous.signedSize || 0);
+    const currSize = Number(current.signedSize || 0);
+    const prevSign = Math.sign(prevSize);
+    const currSign = Math.sign(currSize);
+
+    if (prevSign === 0 && currSign !== 0) {
       eventCount++;
-      if (plan.skip) {
-        console.log("[COPY SKIPPED] " + JSON.stringify(plan));
-        continue;
-      }
-      await copyFill(fill, plan);
+      const plan = positionPlan(current, "OPEN");
+      console.log("[POSITION CHANGE] flat -> " + (currSign > 0 ? "LONG" : "SHORT") + " source net=" + currSize);
+      await copyFill(plan);
+    } else if (prevSign !== 0 && currSign === 0) {
+      eventCount++;
+      const plan = positionPlan(previous, "CLOSE");
+      console.log("[POSITION CHANGE] " + (prevSign > 0 ? "LONG" : "SHORT") + " -> flat source");
+      await copyFill(plan);
+    } else if (prevSign !== 0 && currSign !== 0 && prevSign !== currSign) {
+      eventCount++;
+      const closePlan = positionPlan(previous, "CLOSE");
+      const openPlan = positionPlan(current, "OPEN");
+      console.log("[POSITION FLIP] source direction changed; dry-run emits close then opposite entry plans");
+      await copyFill(closePlan);
+      await copyFill(openPlan);
+    } else if (prevSign === currSign && prevSign !== 0 && prevSize !== currSize) {
+      console.log("[POSITION SIZE CHANGE] source net changed from " + prevSize + " to " + currSize +
+        "; target remains fixed at " + FIXED_CONTRACTS + " contract and no extra entry is planned");
     }
-    if (seen.size > MAX_SEEN) {
-      const keep = [...seen].slice(-Math.floor(MAX_SEEN / 2));
-      seen.clear();
-      for (const id of keep) seen.add(id);
-    }
-    if (attempted.size > MAX_SEEN) {
-      const keep = [...attempted].slice(-Math.floor(MAX_SEEN / 2));
-      attempted.clear();
-      for (const id of keep) attempted.add(id);
-    }
+
+    lastSourceSnapshot = current;
     saveState();
     lastSuccessAt = new Date().toISOString();
     lastError = null;
-    console.log("[POLL OK] fillsReturned=" + fills.length + " eventCount=" + eventCount +
-      " mode=" + (executionEnabled ? "LIVE_GATED" : "DRY_RUN") +
-      " deltaProduct=" + PRODUCT_SYMBOL);
+    console.log("[POLL OK] mode=DRY_RUN source=positions openGoldPositions=" +
+      current.positionCount + " netSourceSize=" + currSize +
+      " netSide=" + (currSign > 0 ? "LONG" : currSign < 0 ? "SHORT" : "FLAT") +
+      " eventCount=" + eventCount + " deltaProduct=" + PRODUCT_SYMBOL);
   } catch (error) {
     lastError = String(error && error.message || error).slice(0, 1000);
     console.error("[POLL ERROR] " + lastError);
@@ -443,6 +520,7 @@ console.log("[START] " + JSON.stringify({
   dryRun: DRY_RUN,
   liveOrderExecution: LIVE_EXECUTION,
   liveConfirmation: LIVE_CONFIRM,
+  executionRequested,
   executionEnabled,
   pollIntervalMs: POLL_MS,
   hasMfpKey: Boolean(MFP_KEY),
@@ -454,7 +532,7 @@ console.log("[START] " + JSON.stringify({
   stateFile: STATE_FILE,
   productMappingConfigured: Boolean(process.env.DELTA_PRODUCT_MAP_JSON)
 }));
-console.log("[SAFETY] MFP BUY -> Delta SELL; MFP SELL -> Delta BUY. Fixed one contract; maximum one net XAUTUSD position. This does not scale to MFP source size.");
+console.log("[SAFETY] Position-transition dry-run: MFP LONG -> Delta SELL; MFP SHORT -> Delta BUY. Existing source position is baselined, never replayed. Fixed one Delta contract maximum. Live order submission is hard-disabled in this revision.");
 if (executionEnabled && (!DELTA_KEY || !DELTA_SECRET)) {
   console.error("[LIVE BLOCKED] Add DELTA_API_KEY and DELTA_API_SECRET to this Railway service.");
 }
