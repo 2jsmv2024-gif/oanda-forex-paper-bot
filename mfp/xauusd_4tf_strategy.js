@@ -13,7 +13,8 @@ const dry=(process.env.DRY_RUN_ONLY||"true").toLowerCase()==="true";
 const liveConfirm=(process.env.MFP_USER_LIVE_CONFIRMATION||"").trim()==="YES";
 // Toggle final BUY/SELL inversion from Railway Variables. Default true preserves current behavior.
 const reverseSignals=(process.env.MFP_REVERSE_SIGNALS||"true").trim().toLowerCase()==="true";
-const executionEnabled=live&&!dry&&liveConfirm;
+const executionRequested=live&&!dry&&liveConfirm;
+let executionEnabled=executionRequested;
 
 const REST_BASE=(process.env.MFP_REST_BASE_URL||"https://developers.myfundedperpetuals.com/v1").replace(/\/$/,"");
 async function rest(method,path,body,idem){
@@ -223,8 +224,26 @@ async function portfolioOrderSize(accountId,sys,side){
   return orderQty;
 }
 let orderQueue=Promise.resolve();
+let pendingOpenReservations=0;
 function open(sys,side,t){
-  const run=()=>openUnlocked(sys,side,t);
+  const run=async()=>{
+    if(positionsBySystem.has(sys.id)){
+      console.warn(`[MFP POSITION CAP] ${sys.id} already has a tracked position; no duplicate entry`);
+      return null;
+    }
+    if(positionsBySystem.size+pendingOpenReservations>=PORTFOLIO_MAX_POSITIONS){
+      console.warn(`[MFP POSITION CAP] blocked ${sys.id} ${side}; maxOpenPositions=${PORTFOLIO_MAX_POSITIONS}`);
+      return null;
+    }
+    pendingOpenReservations++;
+    try{
+      const x=await openUnlocked(sys,side,t);
+      if(x)positionsBySystem.set(sys.id,{side,id:v(x,["position_id","id","positionId"])});
+      return x;
+    } finally {
+      pendingOpenReservations--;
+    }
+  };
   const next=orderQueue.then(run,run);
   orderQueue=next.catch(()=>{});
   return next;
@@ -464,6 +483,31 @@ marketReady=true;
 orderMarket=String(v(mi,["market_id","marketId","id"])||market);
 console.log("[MFP MARKET META] "+JSON.stringify(mi).slice(0,5000));
 console.log("[MFP ORDER MARKET] "+orderMarket);
+
+// Live-only fail-closed startup gate: the local process cannot adopt positions
+// opened by Railway or a previous process. Require a flat XAU market before
+// allowing any local live order, otherwise the first signal could duplicate exposure.
+if(executionEnabled){
+  try{
+    const positionResult=u(await listPositions(await account()));
+    const existingPositions=Array.isArray(positionResult)?positionResult:(positionResult?.data||positionResult?.positions||[]);
+    const existingXau=existingPositions.filter(p=>{
+      const id=String(v(p,["market_id","marketId","market","symbol","ticker","coin","name"])||"").toLowerCase();
+      const serialized=JSON.stringify(p||{}).toLowerCase();
+      return id===String(orderMarket).toLowerCase() || id===String(market).toLowerCase()
+        || serialized.includes("xau") || serialized.includes("gold");
+    });
+    if(existingXau.length){
+      executionEnabled=false;
+      console.error("[MFP LIVE BLOCK] Existing XAU/GOLD positions found at startup ("+existingXau.length+"). Local execution disabled; reconcile/flatten positions before cutover.");
+    }else{
+      console.log("[MFP LIVE PRECHECK] No existing XAU/GOLD positions returned; local execution gate passed.");
+    }
+  }catch(e){
+    executionEnabled=false;
+    console.error("[MFP LIVE BLOCK] Could not verify existing positions; local execution disabled. "+(e?.message||e));
+  }
+}
 console.log("[MFP EXPOSURE LIMIT] max_pair_exposure_usd="+MAX_PAIR_EXPOSURE_USD);
 const streamSymbol=String(v(mi,["coin","stream_symbol","symbol","market_symbol","ticker"])||"");
 if(!streamSymbol) throw Error("MFP Binance XAU-USD stream symbol unavailable; orders remain blocked");
