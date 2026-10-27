@@ -42,6 +42,7 @@ try {
 }
 
 const seen = new Set();
+let baselineReady = false;
 let accountId = CONFIGURED_ACCOUNT || null;
 let lastPollAt = null;
 let lastSuccessAt = null;
@@ -112,7 +113,7 @@ async function mfpGet(path) {
 
 function rowsOf(value) {
   if (Array.isArray(value)) return value;
-  for (const key of ["fills", "results", "items", "orders"]) {
+  for (const key of ["fills", "results", "items", "orders", "result"]) {
     if (Array.isArray(value?.[key])) return value[key];
   }
   if (Array.isArray(value?.data)) return value.data;
@@ -252,22 +253,22 @@ async function pollOnce() {
   polling = true;
   lastPollAt = new Date().toISOString();
   try {
+    if (!baselineReady) throw new Error("Historical fill baseline not established; refusing to plan copy events");
     const fills = await listFills();
-    const newFills = [];
-    for (const fill of fills) {
+    const newFills = fills.filter(fill => {
       const id = stableId(fill);
-      if (!id || seen.has(id)) continue;
-      seen.add(id);
-      newFills.push(fill);
-    }
+      return Boolean(id) && !seen.has(id);
+    });
 
     if (newFills.length) {
       const quote = await deltaQuote();
       for (const fill of newFills) {
-        eventCount++;
+        const id = stableId(fill);
         const plan = planFor(fill, quote);
         console.log("[COPY PLAN ONLY] " + JSON.stringify(plan));
         console.log("No Delta order sent.");
+        if (id) seen.add(id);
+        eventCount++;
       }
     }
 
@@ -304,10 +305,16 @@ console.log("[SAFETY] This code contains no Delta order submission function.");
 try {
   await discoverAccount();
   await seedBaseline();
-  await deltaQuote();
+  baselineReady = true;
+  try {
+    await deltaQuote();
+  } catch (quoteError) {
+    console.warn("[DELTA QUOTE CHECK WARNING] " + String(quoteError?.message || quoteError).slice(0, 600));
+  }
   lastSuccessAt = new Date().toISOString();
 } catch (error) {
   lastError = String(error?.message || error).slice(0, 1000);
+  baselineReady = false;
   console.error("[STARTUP PREFLIGHT FAILED] " + lastError);
 }
 
