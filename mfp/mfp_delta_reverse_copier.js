@@ -153,8 +153,10 @@ function positionPlan(snapshot, transition) {
   const sourceSide = snapshot.signedSize > 0 ? "BUY" : "SELL";
   const isClose = transition === "CLOSE";
   const plannedDeltaSide = isClose ? sourceSide : reverseSide(sourceSide);
+  // Deterministic transition ID: identical snapshots must never generate a new
+  // id on a later poll or after a process restart.
   const digest = crypto.createHash("sha256")
-    .update(transition + "|" + snapshot.signature + "|" + snapshot.signedSize + "|" + String(snapshot.updatedAt))
+    .update(transition + "|" + snapshot.signature + "|" + snapshot.signedSize)
     .digest("hex").slice(0, 20);
   return {
     id: "mfp-position-" + transition.toLowerCase() + ":" + digest,
@@ -357,6 +359,11 @@ async function copyFill(fill, plan) {
     console.error("[COPY BLOCKED] Delta preflight not ready; fill=" + plan.id + " no order sent");
     return false;
   }
+  const transitionKey = String(plan.id);
+  if (attempted.has(transitionKey)) {
+    console.error("[COPY BLOCKED] transition already marked attempted; reconcile Delta orders/positions before any retry; id=" + transitionKey);
+    return false;
+  }
   const current = await deltaPosition();
   const signedSize = current.signedSize;
   const wantedSign = plan.plannedDeltaSide === "BUY" ? 1 : -1;
@@ -406,6 +413,10 @@ async function copyFill(fill, plan) {
     contracts: body.size, reduceOnly: close, clientOrderId: clientId,
     approximateMarginUSD: marginEstimate, availableUSD: usd
   }));
+  // Persist the idempotency marker before the POST. If the response times out,
+  // this transition remains blocked until an operator reconciles Delta manually.
+  attempted.add(transitionKey);
+  saveState();
   try {
     // A single POST only. A timeout/error is ambiguous: never automatically retry.
     const response = deltaResult(await deltaSigned("POST", "/v2/orders", body));
