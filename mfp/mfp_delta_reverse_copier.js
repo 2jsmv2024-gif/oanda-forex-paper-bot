@@ -447,8 +447,15 @@ async function pollOnce() {
   try {
     if (!MFP_KEY) throw new Error("MFP_API_KEY missing in copier service variables");
     if (!ACCOUNT_ID) throw new Error("MFP_ACCOUNT_ID missing in copier service variables");
+    if (executionEnabled) await preflightDelta();
     const response = await mfpGet("/positions?account_id=" + encodeURIComponent(ACCOUNT_ID) + "&status=open&limit=100");
     const current = buildSourcePositionSnapshot(response);
+    // On activation, wait for successful Delta preflight before baseline. If
+    // preflight is blocked, do not create any orders or advance the baseline.
+    if (executionEnabled && !liveActivationBaselineDone && !liveReady) {
+      console.error("[LIVE WAITING] Delta preflight has not passed; no orders allowed.");
+      return;
+    }
     // On the first poll after process start, live activation always refreshes the
     // baseline and sends no order for a pre-existing source position.
     if (executionEnabled && !liveActivationBaselineDone) {
@@ -545,7 +552,7 @@ console.log("[START] " + JSON.stringify({
   stateFile: STATE_FILE,
   productMappingConfigured: Boolean(process.env.DELTA_PRODUCT_MAP_JSON)
 }));
-console.log("[SAFETY] Position-transition dry-run: MFP LONG -> Delta SELL; MFP SHORT -> Delta BUY. Existing source position is baselined, never replayed. Fixed one Delta contract maximum. Live order submission is hard-disabled in this revision.");
+console.log("[SAFETY] MFP LONG -> Delta SELL; MFP SHORT -> Delta BUY. Live mode requires DRY_RUN_ONLY=false, LIVE_ORDER_EXECUTION=true, DELTA_LIVE_CONFIRMATION=YES, successful Delta preflight, and a fresh activation baseline. Fixed one Delta contract maximum.");
 if (executionEnabled && (!DELTA_KEY || !DELTA_SECRET)) {
   console.error("[LIVE BLOCKED] Add DELTA_API_KEY and DELTA_API_SECRET to this Railway service.");
 }
