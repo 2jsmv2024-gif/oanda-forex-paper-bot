@@ -33,6 +33,8 @@ let polling = false;
 let baselineInitialized = false;
 let sourceSnapshotInitialized = false;
 let lastSourceSnapshot = null;
+let pendingSourceSnapshot = null;
+let pendingSourceConfirmations = 0;
 let liveActivationBaselineDone = false;
 let lastDeltaPosition = null;
 let productMeta = null;
@@ -349,11 +351,11 @@ function describeFill(fill) {
 async function copyFill(fill, plan) {
   if (!executionEnabled) {
     console.log("[COPY PLAN] " + JSON.stringify({ ...plan, mode: "DRY_RUN_ONLY", deltaOrderSent: false }));
-    return;
+    return true;
   }
   if (!liveReady) {
     console.error("[COPY BLOCKED] Delta preflight not ready; fill=" + plan.id + " no order sent");
-    return;
+    return false;
   }
   const current = await deltaPosition();
   const signedSize = current.signedSize;
@@ -362,12 +364,12 @@ async function copyFill(fill, plan) {
   if (close) {
     if (signedSize === 0 || Math.sign(signedSize) !== -wantedSign) {
       console.warn("[CLOSE SKIPPED] no matching inverse Delta position for source close; fill=" + plan.id + " currentDeltaSize=" + signedSize);
-      return;
+      return false;
     }
   } else {
     if (signedSize !== 0) {
       console.warn("[ENTRY SKIPPED] one-contract cap/current position prevents adding another entry; fill=" + plan.id + " currentDeltaSize=" + signedSize);
-      return;
+      return false;
     }
   }
   const usd = await deltaUsdAvailable();
@@ -382,7 +384,7 @@ async function copyFill(fill, plan) {
     marginEstimate + price * contractValue * FIXED_CONTRACTS * feeRate + 0.005;
   if (!close && (!(Number.isFinite(usd) && usd >= reserve))) {
     console.error("[ENTRY BLOCKED] available USD does not cover estimated margin/fee buffer; fill=" + plan.id + " available=" + usd + " requiredApprox=" + reserve);
-    return;
+    return false;
   }
   const clientId = "mfp-rev-" + crypto.createHash("sha256").update(String(plan.id)).digest("hex").slice(0, 24);
   const body = {
@@ -414,6 +416,22 @@ async function copyFill(fill, plan) {
     console.error("[DELTA ORDER ERROR - DO NOT AUTO-RETRY] sourceFillId=" + plan.id + " error=" + String(e && e.message || e).slice(0, 1200));
     throw e;
   }
+
+  if (close) {
+    // Do not open the new side of a flip until Delta confirms the old side is flat.
+    for (let check = 1; check <= 10; check++) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+      const afterClose = await deltaPosition();
+      if (afterClose.signedSize === 0) {
+        console.log("[DELTA CLOSE CONFIRMED] sourceFillId=" + plan.id + " Delta position is flat");
+        return true;
+      }
+    }
+    console.error("[DELTA CLOSE NOT CONFIRMED] sourceFillId=" + plan.id +
+      "; new-side entry will be blocked to avoid overlapping opposite positions");
+    return false;
+  }
+  return true;
 }
 const server = createServer((req, res) => {
   if (req.url === "/health" || req.url === "/health/ready") {
@@ -491,6 +509,35 @@ async function pollOnce() {
     const prevSign = Math.sign(prevSize);
     const currSign = Math.sign(currSize);
 
+    // Require the changed net position to be seen identically twice before acting.
+    // This filters transient API snapshots. Don't advance the baseline on an unconfirmed change.
+    const sameAsBaseline = String(previous.signature || "") === String(current.signature || "") &&
+      prevSize === currSize;
+    if (sameAsBaseline) {
+      pendingSourceSnapshot = null;
+      pendingSourceConfirmations = 0;
+    } else {
+      if (pendingSourceSnapshot &&
+          String(pendingSourceSnapshot.signature || "") === String(current.signature || "") &&
+          Number(pendingSourceSnapshot.signedSize || 0) === currSize) {
+        pendingSourceConfirmations++;
+      } else {
+        pendingSourceSnapshot = current;
+        pendingSourceConfirmations = 1;
+      }
+      if (pendingSourceConfirmations < 2) {
+        lastSuccessAt = new Date().toISOString();
+        lastError = null;
+        console.log("[POSITION CHANGE PENDING] netSide=" +
+          (currSign > 0 ? "LONG" : currSign < 0 ? "SHORT" : "FLAT") +
+          " netSourceSize=" + currSize + " stableConfirmations=" +
+          pendingSourceConfirmations + "/2; no order sent yet");
+        return;
+      }
+      pendingSourceSnapshot = null;
+      pendingSourceConfirmations = 0;
+    }
+
     if (prevSign === 0 && currSign !== 0) {
       eventCount++;
       const plan = positionPlan(current, "OPEN");
@@ -505,9 +552,13 @@ async function pollOnce() {
       eventCount++;
       const closePlan = positionPlan(previous, "CLOSE");
       const openPlan = positionPlan(current, "OPEN");
-      console.log("[POSITION FLIP] source direction changed; dry-run emits close then opposite entry plans");
-      await copyFill(null, closePlan);
-      await copyFill(null, openPlan);
+      console.log("[POSITION FLIP] source direction changed; close old inverse position before opening new side");
+      const closeConfirmed = await copyFill(null, closePlan);
+      if (closeConfirmed) {
+        await copyFill(null, openPlan);
+      } else {
+        console.error("[FLIP ENTRY BLOCKED] prior Delta close was not confirmed; no new-side entry sent");
+      }
     } else if (prevSign === currSign && prevSign !== 0 && prevSize !== currSize) {
       console.log("[POSITION SIZE CHANGE] source net changed from " + prevSize + " to " + currSize +
         "; target remains fixed at " + FIXED_CONTRACTS + " contract and no extra entry is planned");
