@@ -154,7 +154,7 @@ async function deltaPublic(endpoint) {
 function deltaResult(response) { return response && (response.result !== undefined ? response.result : response.data !== undefined ? response.data : response); }
 async function deltaPosition() {
   const r = deltaResult(await deltaSigned("GET", "/v2/positions?product_id=" + PRODUCT_ID));
-  const rows = rowsOf(r);
+  const rows = Array.isArray(r) ? r : (r && typeof r === "object" && ("size" in r || "product_id" in r) ? [r] : rowsOf(r));
   const p = rows.find(x => Number(x.product_id || PRODUCT_ID) === PRODUCT_ID && Number(x.size) !== 0);
   if (!p) return { signedSize: 0, raw: null };
   let size = Number(p.size || 0);
@@ -174,6 +174,7 @@ async function deltaUsdAvailable() {
   return w ? Number(w.available_balance) : null;
 }
 async function preflightDelta() {
+  if (liveReady) return;
   liveReady = false;
   if (!executionEnabled) return;
   if (!DELTA_KEY || !DELTA_SECRET) {
