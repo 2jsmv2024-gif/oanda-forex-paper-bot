@@ -8,7 +8,7 @@ const CONFIGURED_ACCOUNT = (process.env.MFP_ACCOUNT_ID || "").trim();
 const POLL_MS = Math.max(5000, Number(process.env.POLL_INTERVAL_MS || 5000));
 const DELTA_PRODUCT_ID = 131253;
 const DELTA_SYMBOL = "XAUTUSD";
-const DELTA_TEST_CONTRACTS = Math.max(1, Math.min(1, Math.floor(Number(process.env.DELTA_TEST_CONTRACTS || 1))));
+const DELTA_TEST_CONTRACTS = 1;
 
 // Explicitly a dry-run monitor. This build contains no Delta order POST code.
 const DRY_RUN = (process.env.DRY_RUN_ONLY || "true").toLowerCase() === "true";
