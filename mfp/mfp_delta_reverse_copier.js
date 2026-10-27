@@ -20,9 +20,9 @@ const PRODUCT_ID = Number(process.env.DELTA_PRODUCT_ID || 131253);
 const PRODUCT_SYMBOL = process.env.DELTA_PRODUCT_SYMBOL || "XAUTUSD";
 const STATE_FILE = process.env.COPIER_STATE_PATH || "/data/mfp_delta_reverse_copier_state.json";
 const executionRequested = !DRY_RUN && LIVE_EXECUTION && LIVE_CONFIRM;
-// This revision is intentionally hard-gated to dry-run while position-transition
-// detection is being validated against the MFP API. Do not enable order submission here.
-const executionEnabled = false;
+// Live mode requires all three explicit operator settings above.
+// This copier only trades one Delta contract and only from source position transitions.
+const executionEnabled = executionRequested;
 const MAX_SEEN = 20000;
 
 let lastPollAt = null;
@@ -33,6 +33,7 @@ let polling = false;
 let baselineInitialized = false;
 let sourceSnapshotInitialized = false;
 let lastSourceSnapshot = null;
+let liveActivationBaselineDone = false;
 let lastDeltaPosition = null;
 let productMeta = null;
 let leverage = null;
@@ -446,11 +447,23 @@ async function pollOnce() {
   try {
     if (!MFP_KEY) throw new Error("MFP_API_KEY missing in copier service variables");
     if (!ACCOUNT_ID) throw new Error("MFP_ACCOUNT_ID missing in copier service variables");
-    if (executionRequested) {
-      console.error("[LIVE BLOCKED] This revision is hard-gated to dry-run while position-transition detection is being validated.");
-    }
     const response = await mfpGet("/positions?account_id=" + encodeURIComponent(ACCOUNT_ID) + "&status=open&limit=100");
     const current = buildSourcePositionSnapshot(response);
+    // On the first poll after process start, live activation always refreshes the
+    // baseline and sends no order for a pre-existing source position.
+    if (executionEnabled && !liveActivationBaselineDone) {
+      lastSourceSnapshot = current;
+      sourceSnapshotInitialized = true;
+      liveActivationBaselineDone = true;
+      saveState();
+      lastSuccessAt = new Date().toISOString();
+      lastError = null;
+      console.log("[LIVE ARM BASELINE] current source position recorded; no catch-up order sent; openGoldPositions=" +
+        current.positionCount + " netSourceSize=" + current.signedSize +
+        " netSide=" + (current.signedSize > 0 ? "LONG" : current.signedSize < 0 ? "SHORT" : "FLAT"));
+      console.log("[POLL OK] mode=LIVE_ARMED source=positions deltaProduct=" + PRODUCT_SYMBOL + "; waiting for next source transition");
+      return;
+    }
     if (!sourceSnapshotInitialized || !lastSourceSnapshot) {
       lastSourceSnapshot = current;
       sourceSnapshotInitialized = true;
