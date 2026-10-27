@@ -227,11 +227,38 @@ function describeFill(fill) {
   const id = stableOrderKey(fill);
   const sourceSide = normalSide(first(fill, ["side", "order_side", "orderSide", "direction"]));
   const targetSymbol = deltaSymbolFor(fill);
-  const size = first(fill, ["size", "quantity", "qty", "filled_size", "filledSize"]);
+  const status = String(first(fill, ["status", "order_status", "orderStatus"]) || "").toLowerCase();
+  const quantityKeys = [
+    "filled_size", "filledSize", "filled_quantity", "filledQuantity",
+    "executed_size", "executedSize", "quantity_filled", "quantityFilled",
+    "fill_size", "fillSize"
+  ];
+  const quantityKey = quantityKeys.find(k =>
+    Object.prototype.hasOwnProperty.call(fill || {}, k) &&
+    fill[k] !== null && fill[k] !== undefined && fill[k] !== ""
+  );
+  const reportedFilled = quantityKey ? Number(fill[quantityKey]) : null;
+  const size = quantityKey ? fill[quantityKey] : first(fill, ["size", "quantity", "qty"]);
   if (!id) return { skip: "fill has no stable order/fill ID" };
   if (!sourceSide) return { id, skip: "unrecognized source side" };
   if (!targetSymbol) return { id, skip: "no explicit Delta mapping for MFP market", mfpMarket: first(fill, ["market_id", "marketId", "symbol", "product_symbol", "productSymbol", "ticker", "market"]) };
-  if (!(Number(size) > 0)) return { id, skip: "source size missing or non-positive" };
+  if (status && !["filled", "partially_filled", "partial", "completed", "executed", "settled"].includes(status)) {
+    return { id, skip: "MFP record is not in a completed/partially-filled state", status };
+  }
+  // Fail closed: if the API explicitly reports zero filled quantity, never infer
+  // an execution from requested order size. This prevents copying ambiguous rows
+  // such as status=filled with filled_size=0.
+  if (quantityKey && !(reportedFilled > 0)) {
+    return {
+      id,
+      skip: "MFP API reports zero/non-positive executed quantity; refusing to infer from order size",
+      status,
+      reportedSize: first(fill, ["size", "quantity", "qty"]),
+      reportedFilledSize: fill[quantityKey],
+      quantityField: quantityKey
+    };
+  }
+  if (!(Number(size) > 0)) return { id, skip: "source execution size missing or non-positive" };
   const isClose = closeFill(fill);
   return {
     id,
@@ -242,10 +269,12 @@ function describeFill(fill) {
     sourceSize: size,
     deltaContracts: FIXED_CONTRACTS,
     isClose,
+    reportedStatus: status || null,
+    quantityField: quantityKey || "size/quantity fallback (no filled-quantity field)",
     sourceOrderId: first(fill, ["order_id", "orderId"]),
     sourceClientOrderId: first(fill, ["client_order_id", "clientOrderId", "order_client_id"]),
     sourceTimestamp: first(fill, ["created_at", "createdAt", "timestamp", "time"]),
-    policy: "fixed small Delta size; not proportional to MFP size"
+    policy: "fixed small Delta size; not proportional to MFP source size; explicit zero fill quantity is skipped"
   };
 }
 async function copyFill(fill, plan) {
