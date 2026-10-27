@@ -362,8 +362,13 @@ async function copyFill(fill, plan) {
   const wantedSign = plan.plannedDeltaSide === "BUY" ? 1 : -1;
   const close = plan.isClose === true;
   if (close) {
-    if (signedSize === 0 || Math.sign(signedSize) !== -wantedSign) {
-      console.warn("[CLOSE SKIPPED] no matching inverse Delta position for source close; fill=" + plan.id + " currentDeltaSize=" + signedSize);
+    if (signedSize === 0) {
+      // Already flat is safe for the next side of a source flip: there is nothing to close.
+      console.warn("[CLOSE SKIPPED] Delta is already flat; no close order needed; fill=" + plan.id);
+      return true;
+    }
+    if (Math.sign(signedSize) !== -wantedSign) {
+      console.warn("[CLOSE BLOCKED] Delta position sign does not match the expected inverse position; fill=" + plan.id + " currentDeltaSize=" + signedSize);
       return false;
     }
   } else {
