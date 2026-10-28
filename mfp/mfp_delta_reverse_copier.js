@@ -256,7 +256,8 @@ async function preflightDelta() {
     return;
   }
   try {
-    const p = deltaResult(await deltaPublic("/v2/products/" + PRODUCT_ID));
+    // Delta documents GET /v2/products/{symbol}; order routes still use numeric product_id.
+    const p = deltaResult(await deltaPublic("/v2/products/" + encodeURIComponent(PRODUCT_SYMBOL)));
     if (!p || Number(p.id) !== PRODUCT_ID || p.symbol !== PRODUCT_SYMBOL ||
         p.state !== "live" || p.trading_status !== "operational") {
       lastError = "Delta product not live/operational";
