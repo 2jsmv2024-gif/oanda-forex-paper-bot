@@ -16,7 +16,7 @@ const DRY_RUN = (process.env.DRY_RUN_ONLY || "true").toLowerCase() === "true";
 const LIVE_EXECUTION = (process.env.LIVE_ORDER_EXECUTION || "false").toLowerCase() === "true";
 const LIVE_CONFIRM = (process.env.DELTA_LIVE_CONFIRMATION || "").trim() === "YES";
 const FIXED_CONTRACTS = Math.max(1, Math.floor(Number(process.env.DELTA_FIXED_CONTRACTS || 1)));
-const PRODUCT_ID = Number(process.env.DELTA_PRODUCT_ID || 131253);
+let PRODUCT_ID = Number(process.env.DELTA_PRODUCT_ID || 0);
 const PRODUCT_SYMBOL = process.env.DELTA_PRODUCT_SYMBOL || "XAUTUSD";
 const STATE_FILE = process.env.COPIER_STATE_PATH || "/data/mfp_delta_reverse_copier_state.json";
 const executionRequested = !DRY_RUN && LIVE_EXECUTION && LIVE_CONFIRM;
@@ -108,9 +108,18 @@ function closeFill(fill) {
   return flag === true || String(flag).toLowerCase() === "true" ||
     client.startsWith("xau4tf-close:") || client.includes(":close:");
 }
+function mappedMfpMarket(rawValue) {
+  const raw = String(rawValue || "").trim();
+  const explicit = mapping[raw] || mapping[raw.toUpperCase()];
+  if (explicit) return explicit;
+  // The source service is the dedicated XAUUSD 4TF strategy. Some MFP position
+  // responses expose the canonical market id while others expose the ticker.
+  // Only use this fallback for clearly gold/XAU-labelled markets.
+  return /XAU|GOLD/i.test(raw) ? PRODUCT_SYMBOL : null;
+}
 function deltaSymbolFor(fill) {
-  const raw = String(first(fill, ["market_id", "marketId", "symbol", "product_symbol", "productSymbol", "ticker", "market"]) || "").trim();
-  return mapping[raw] || mapping[raw.toUpperCase()] || null;
+  const raw = first(fill, ["market_id", "marketId", "symbol", "product_symbol", "productSymbol", "ticker", "market"]);
+  return mappedMfpMarket(raw);
 }
 function positionRowsOf(value) {
   if (Array.isArray(value)) return value;
@@ -130,7 +139,7 @@ function buildSourcePositionSnapshot(response) {
     const status = String(first(row, ["status", "position_status", "positionStatus"]) || "open").toLowerCase();
     if (status && !["open", "active"].includes(status)) continue;
     const rawMarket = String(first(row, ["market_id", "marketId", "symbol", "product_symbol", "productSymbol", "ticker", "market"]) || "").trim();
-    const target = mapping[rawMarket] || mapping[rawMarket.toUpperCase()] || null;
+    const target = mappedMfpMarket(rawMarket);
     if (target !== PRODUCT_SYMBOL) continue;
     const side = normalSide(first(row, ["side", "position_side", "positionSide", "direction"]));
     const size = Number(first(row, ["size", "quantity", "qty", "position_size", "positionSize"]));
@@ -243,8 +252,22 @@ async function deltaOpenOrders() {
 async function deltaUsdAvailable() {
   const r = deltaResult(await deltaSigned("GET", "/v2/wallet/balances"));
   const rows = rowsOf(r);
-  const w = rows.find(x => String(x.asset_symbol || x.asset || "").toUpperCase() === "USD");
-  return w ? Number(w.available_balance) : null;
+  const settlement = first(productMeta, ["settling_asset_symbol", "settlement_asset_symbol", "settling_asset", "settlement_asset"]);
+  const settlementSymbol = String(
+    typeof settlement === "object" ? first(settlement, ["symbol", "asset_symbol", "name"]) : settlement || ""
+  ).toUpperCase();
+  const walletSymbol = row => String(first(row, ["asset_symbol", "asset", "symbol", "currency"]) || "").toUpperCase();
+  const preferred = settlementSymbol ? rows.find(x => walletSymbol(x) === settlementSymbol) : null;
+  const usdLike = rows.find(x => ["USD", "USDT"].includes(walletSymbol(x)));
+  const w = preferred || usdLike;
+  if (!w) {
+    console.error("[DELTA BALANCE] no USD/USDT wallet row matched; walletAssets=" +
+      rows.map(x => walletSymbol(x)).filter(Boolean).join(","));
+    return null;
+  }
+  const available = Number(first(w, ["available_balance", "available", "availableBalance"]));
+  console.log("[DELTA BALANCE] asset=" + walletSymbol(w) + " available=" + available);
+  return Number.isFinite(available) ? available : null;
 }
 async function preflightDelta() {
   if (liveReady) return;
@@ -258,12 +281,23 @@ async function preflightDelta() {
   try {
     // Delta documents GET /v2/products/{symbol}; order routes still use numeric product_id.
     const p = deltaResult(await deltaPublic("/v2/products/" + encodeURIComponent(PRODUCT_SYMBOL)));
-    if (!p || Number(p.id) !== PRODUCT_ID || p.symbol !== PRODUCT_SYMBOL ||
-        p.state !== "live" || p.trading_status !== "operational") {
-      lastError = "Delta product not live/operational";
-      console.error("[LIVE BLOCKED] " + lastError);
+    const resolvedProductId = Number(p && p.id);
+    if (!p || !Number.isFinite(resolvedProductId) || resolvedProductId <= 0 ||
+        String(p.symbol || "").toUpperCase() !== PRODUCT_SYMBOL.toUpperCase() ||
+        String(p.state || "").toLowerCase() !== "live" ||
+        (p.trading_status != null && String(p.trading_status).toLowerCase() !== "operational")) {
+      lastError = "Delta product missing, not live, or not operational";
+      console.error("[LIVE BLOCKED] " + lastError + " product=" + JSON.stringify({
+        symbol: p && p.symbol, id: p && p.id, state: p && p.state,
+        trading_status: p && p.trading_status
+      }));
       return;
     }
+    if (PRODUCT_ID && PRODUCT_ID !== resolvedProductId) {
+      console.warn("[DELTA PRODUCT ID] configured id=" + PRODUCT_ID +
+        " differs from symbol lookup id=" + resolvedProductId + "; using the verified " + PRODUCT_SYMBOL + " symbol id");
+    }
+    PRODUCT_ID = resolvedProductId;
     productMeta = p;
     const l = deltaResult(await deltaSigned("GET", "/v2/products/" + PRODUCT_ID + "/orders/leverage"));
     leverage = Number(l && l.leverage);
