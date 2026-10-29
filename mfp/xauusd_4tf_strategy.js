@@ -35,6 +35,23 @@ let raw=[],cur=null,sk=null;
 const positionsBySystem=new Map();
 const lastSignal=new Map();
 
+// Read-only, authenticated MT5 fill-event feed. This does not alter strategy
+// signals or MFP order execution. MT5 must poll with X-MT5-Bridge-Token.
+const bridgeToken=(process.env.MT5_BRIDGE_TOKEN||"").trim();
+const bridgeEvents=[];
+let bridgeSeq=0;
+const BRIDGE_EVENT_LIMIT=2000;
+function publishBridgeEvent(event){
+  if(!bridgeToken){console.warn("[MT5 BRIDGE] token not configured; event not published");return;}
+  const item={seq:++bridgeSeq,id:"mfp-xau-4tf-"+bridgeSeq,type:event.type,system:event.system,
+    source_side:event.source_side,position_id:String(event.position_id||""),size:Math.abs(+(event.size||0)),
+    timestamp:new Date().toISOString()};
+  bridgeEvents.push(item);
+  if(bridgeEvents.length>BRIDGE_EVENT_LIMIT)bridgeEvents.splice(0,bridgeEvents.length-BRIDGE_EVENT_LIMIT);
+  console.log("[MT5 BRIDGE EVENT] "+JSON.stringify(item));
+}
+
+
 const FILL_CONFIRM_MS=15000;
 const FILL_POLL_MS=500;
 const ORDER_COOLDOWN_RETRY_MS=5000;
@@ -49,11 +66,26 @@ let marketReady=false;
 let feedReady=false;
 let lastHealthTickAt=0;
 const healthServer=createServer((req,res)=>{
-  if(req.url==="/health" || req.url==="/health/ready"){
-    const body=JSON.stringify({ok:true,service:"mfp-xauusd-4tf",marketReady,feedReady,lastTickAt:lastHealthTickAt||null,executionEnabled});
+  const url=new URL(req.url||"/","http://railway.local");
+  if(url.pathname==="/health" || url.pathname==="/health/ready"){
+    const body=JSON.stringify({ok:true,service:"mfp-xauusd-4tf",marketReady,feedReady,lastTickAt:lastHealthTickAt||null,executionEnabled,mt5BridgeConfigured:!!bridgeToken});
     res.writeHead(200,{"content-type":"application/json","cache-control":"no-store"});res.end(body);return;
   }
-  res.writeHead(404,{"content-type":"application/json"});res.end(JSON.stringify({error:"not_found"}));
+  if(url.pathname==="/mt5/events"){
+    if(!bridgeToken || req.headers["x-mt5-bridge-token"]!==bridgeToken){
+      res.writeHead(401,{"content-type":"application/json","cache-control":"no-store"});res.end(JSON.stringify({error:"unauthorized"}));return;
+    }
+    if(req.method!=="GET"){
+      res.writeHead(405,{"content-type":"application/json","allow":"GET","cache-control":"no-store"});res.end(JSON.stringify({error:"method_not_allowed"}));return;
+    }
+    const after=Math.max(0,Number.parseInt(url.searchParams.get("after")||"0",10)||0);
+    const first=bridgeEvents[0]?.seq??(bridgeSeq+1);
+    const gap=after<first-1;
+    const events=gap?[]:bridgeEvents.filter(e=>e.seq>after);
+    res.writeHead(200,{"content-type":"application/json","cache-control":"no-store"});
+    res.end(JSON.stringify({ok:true,gap,firstAvailableSeq:first,lastSeq:bridgeSeq,events}));return;
+  }
+  res.writeHead(404,{"content-type":"application/json","cache-control":"no-store"});res.end(JSON.stringify({error:"not_found"}));
 });
 healthServer.listen(+(process.env.PORT||8080),"0.0.0.0",()=>console.log("[HEALTH] listening port="+(process.env.PORT||8080)));
 
@@ -332,6 +364,8 @@ async function openUnlocked(sys,side,t){
         const pid=v(p,["position_id","positionId","id"]);
         const psize=Math.abs(+(v(p,["size","quantity","qty","position_size","positionSize"])||0));
         console.log(`[MFP FILL CONFIRMED] ${sys.id} ${side} position=${pid??""} size=${psize} orderId=${orderId??""}`);
+        // Publish only after an actual open position was observed from MFP.
+        if(pid && psize>0) publishBridgeEvent({type:"OPEN",system:sys.id,source_side:side,position_id:pid,size:psize});
         return {...order,position_id:pid,filled_size:psize};
       }
     }catch(e){
@@ -345,23 +379,42 @@ async function openUnlocked(sys,side,t){
 }
 
 async function closeSystem(sys,side){
-  if(!executionEnabled)return;
+  if(!executionEnabled)return false;
   const tracked=positionsBySystem.get(sys.id);
-  if(!tracked?.id)return;
-  const ps=u(await listPositions(await account()));
+  if(!tracked?.id)return false;
+  const accountId=await account();
+  const ps=u(await listPositions(accountId));
   const arr=Array.isArray(ps)?ps:ps?.data||[];
   const p=arr.find(x=>String(v(x,["position_id","id","positionId"]))===String(tracked.id));
-  if(p){
-    const pside=String(v(p,["side","position_side","positionSide"])||"").toLowerCase();
-    const closeSide=pside.includes("short")?"buy":"sell";
-    const size=Math.abs(+(v(p,["size","quantity","qty","position_size","positionSize"])||0));
-    if(size){
-      const closeKey=("xau4tf-close:"+sys.id+":"+Date.now()).slice(0,128);
-      await closePosition(tracked.id,{client_order_id:closeKey,type:"market",size,expected_price:cur?.close||undefined},closeKey);
-    }
+  if(!p){
+    // Already absent at the broker; safe to clear local tracking but do not
+    // fabricate a close event because the actual close quantity is unknown.
+    positionsBySystem.delete(sys.id);
+    console.warn(`[MFP CLOSE RECONCILE] ${sys.id} position=${tracked.id} already absent; no MT5 close event emitted`);
+    return false;
   }
-  positionsBySystem.delete(sys.id);
-  console.log(`[MFP CLOSE] ${sys.id} ${side}`);
+  const pside=String(v(p,["side","position_side","positionSide"])||"").toLowerCase();
+  const size=Math.abs(+(v(p,["size","quantity","qty","position_size","positionSize"])||0));
+  if(!size){console.warn(`[MFP CLOSE BLOCK] ${sys.id} position size unavailable; tracking retained`);return false;}
+  const closeKey=("xau4tf-close:"+sys.id+":"+Date.now()).slice(0,128);
+  await closePosition(tracked.id,{client_order_id:closeKey,type:"market",size,expected_price:cur?.close||undefined},closeKey);
+  // Confirm the broker position is gone before publishing CLOSE. If still open,
+  // retain tracking and emit nothing so MT5 cannot diverge on an unconfirmed close.
+  const deadline=Date.now()+FILL_CONFIRM_MS;
+  while(Date.now()<deadline){
+    const check=u(await listPositions(accountId));
+    const rows=Array.isArray(check)?check:(check?.data||[]);
+    const still=rows.find(x=>String(v(x,["position_id","id","positionId"]))===String(tracked.id));
+    if(!still){
+      positionsBySystem.delete(sys.id);
+      publishBridgeEvent({type:"CLOSE",system:sys.id,source_side:tracked.side,position_id:tracked.id,size});
+      console.log(`[MFP CLOSE CONFIRMED] ${sys.id} position=${tracked.id} size=${size}`);
+      return true;
+    }
+    await new Promise(r=>setTimeout(r,FILL_POLL_MS));
+  }
+  console.error(`[MFP CLOSE UNCONFIRMED] ${sys.id} position=${tracked.id}; tracking retained and no MT5 close event emitted`);
+  return false;
 }
 
 async function handle(sys,event){
@@ -373,7 +426,9 @@ async function handle(sys,event){
 
   const current=positionsBySystem.get(sys.id);
   if(current&&current.side!==event.s){
-    await closeSystem(sys,event.s);
+    const closed=await closeSystem(sys,event.s);
+    // Never open the reverse MFP leg until the previous close is confirmed.
+    if(!closed)return;
     const x=await open(sys,event.s,event.t);
     if(x)positionsBySystem.set(sys.id,{side:event.s,id:v(x,["position_id","id","positionId"])});
     return;
