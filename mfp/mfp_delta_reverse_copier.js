@@ -8,6 +8,8 @@ const SERVICE = "mfp-delta-reverse-copier";
 const MFP_BASE = (process.env.MFP_REST_BASE_URL || "https://developers.myfundedperpetuals.com/v1").replace(/\/+$/, "");
 const DELTA_BASE = (process.env.DELTA_BASE_URL || "https://api.india.delta.exchange").replace(/\/+$/, "");
 const MFP_KEY = (process.env.MFP_API_KEY || "").trim();
+const XAU4TF_EVENTS_URL = (process.env.MFP_XAU_4TF_EVENTS_URL || "").trim().replace(/\/+$/, "");
+const XAU4TF_BRIDGE_TOKEN = (process.env.MT5_BRIDGE_TOKEN || "").trim();
 const ACCOUNT_ID = (process.env.MFP_ACCOUNT_ID || "").trim();
 const DELTA_KEY = (process.env.DELTA_API_KEY || "").trim();
 const DELTA_SECRET = (process.env.DELTA_API_SECRET || "").trim();
@@ -31,6 +33,7 @@ let lastError = null;
 let eventCount = 0;
 let polling = false;
 let baselineInitialized = false;
+let bridgeCursor = 0;
 let sourceSnapshotInitialized = false;
 let lastSourceSnapshot = null;
 let pendingSourceSnapshot = null;
@@ -51,6 +54,7 @@ function readState() {
     for (const id of Array.isArray(s.seen) ? s.seen : []) seen.add(String(id));
     for (const id of Array.isArray(s.attempted) ? s.attempted : []) attempted.add(String(id));
     baselineInitialized = s.baselineInitialized === true;
+    bridgeCursor = Number.isSafeInteger(s.bridgeCursor) && s.bridgeCursor >= 0 ? s.bridgeCursor : 0;
     sourceSnapshotInitialized = s.sourceSnapshotInitialized === true;
     lastSourceSnapshot = s.lastSourceSnapshot && typeof s.lastSourceSnapshot === "object"
       ? s.lastSourceSnapshot : null;
@@ -61,6 +65,7 @@ function saveState() {
   fs.mkdirSync(dir, { recursive: true });
   const payload = {
     baselineInitialized,
+    bridgeCursor,
     sourceSnapshotInitialized,
     lastSourceSnapshot,
     seen: [...seen].slice(-MAX_SEEN),
@@ -516,113 +521,61 @@ async function pollOnce() {
   try {
     if (!MFP_KEY) throw new Error("MFP_API_KEY missing in copier service variables");
     if (!ACCOUNT_ID) throw new Error("MFP_ACCOUNT_ID missing in copier service variables");
-    if (executionEnabled) await preflightDelta();
-    const response = await mfpGet("/positions?account_id=" + encodeURIComponent(ACCOUNT_ID) + "&status=open&limit=100");
-    const current = buildSourcePositionSnapshot(response);
-    // On activation, wait for successful Delta preflight before baseline. If
-    // preflight is blocked, do not create any orders or advance the baseline.
-    if (executionEnabled && !liveActivationBaselineDone && !liveReady) {
-      console.error("[LIVE WAITING] Delta preflight has not passed; no orders allowed.");
-      return;
+    if (!XAU4TF_EVENTS_URL) throw new Error("MFP_XAU_4TF_EVENTS_URL missing; confirmed-fill event feed is required");
+    if (!XAU4TF_BRIDGE_TOKEN) throw new Error("MT5_BRIDGE_TOKEN missing; confirmed-fill event feed is protected");
+    const response = await fetchJson(XAU4TF_EVENTS_URL + "?after=" + bridgeCursor, "GET", {
+      Accept: "application/json",
+      "X-MT5-Bridge-Token": XAU4TF_BRIDGE_TOKEN,
+      "User-Agent": "MFP-Delta-Reverse-Copier/1.0"
+    });
+    const data = response && (response.data && !Array.isArray(response.data) ? response.data : response);
+    const events = Array.isArray(data.events) ? data.events : null;
+    const latest = Number(data.lastSeq);
+    if (data.gap === true || (Number.isFinite(latest) && latest < bridgeCursor)) {
+      throw new Error("Confirmed-fill event feed gap/reset detected; refusing to skip events or place orders");
     }
-    // On the first poll after process start, live activation always refreshes the
-    // baseline and sends no order for a pre-existing source position.
-    if (executionEnabled && !liveActivationBaselineDone) {
-      lastSourceSnapshot = current;
-      sourceSnapshotInitialized = true;
-      liveActivationBaselineDone = true;
+    if (!events) throw new Error("Confirmed-fill feed returned no events array; refusing position-snapshot fallback");
+    for (const ev of events) {
+      const seq = Number(ev.seq);
+      const type = String(ev.type || "").toUpperCase();
+      const sourceSide = normalSide(ev.source_side);
+      if (!Number.isSafeInteger(seq) || seq <= bridgeCursor) continue;
+      if (seq !== bridgeCursor + 1) throw new Error("Confirmed-fill sequence gap at seq=" + seq + " cursor=" + bridgeCursor);
+      if (!["OPEN", "CLOSE"].includes(type) || !sourceSide || !(Number(ev.size) > 0) || !ev.position_id) {
+        throw new Error("Malformed confirmed-fill event seq=" + seq + "; refusing to advance cursor");
+      }
+      const isClose = type === "CLOSE";
+      const plan = {
+        id: String(ev.id || ("mfp-xau-4tf-" + seq)),
+        sourceSide,
+        plannedDeltaSide: isClose ? sourceSide : reverseSide(sourceSide),
+        sourceMarket: "MFP_XAUUSD_4TF",
+        deltaProduct: PRODUCT_SYMBOL,
+        sourceSize: Number(ev.size),
+        deltaContracts: FIXED_CONTRACTS,
+        isClose,
+        sourceClientOrderId: null,
+        sourcePositionId: String(ev.position_id),
+        sourceSystem: String(ev.system || ""),
+        sourceTimestamp: String(ev.timestamp || ""),
+        policy: "confirmed MFP XAUUSD 4TF fill event; inverse Delta side; fixed contract size"
+      };
+      eventCount++;
+      console.log("[CONFIRMED SOURCE EVENT] " + JSON.stringify({
+        seq, id: plan.id, type, system: plan.sourceSystem, sourceSide,
+        positionId: plan.sourcePositionId, sourceSize: plan.sourceSize,
+        deltaSide: plan.plannedDeltaSide, mode: DRY_RUN ? "DRY_RUN" : "LIVE_GATED"
+      }));
+      const ok = await copyFill(null, plan);
+      if (!ok) throw new Error("Event " + seq + " was not safely handled; cursor remains at " + bridgeCursor + " for manual reconciliation");
+      bridgeCursor = seq;
       saveState();
-      lastSuccessAt = new Date().toISOString();
-      lastError = null;
-      console.log("[LIVE ARM BASELINE] current source position recorded; no catch-up order sent; openGoldPositions=" +
-        current.positionCount + " netSourceSize=" + current.signedSize +
-        " netSide=" + (current.signedSize > 0 ? "LONG" : current.signedSize < 0 ? "SHORT" : "FLAT"));
-      console.log("[POLL OK] mode=LIVE_ARMED source=positions deltaProduct=" + PRODUCT_SYMBOL + "; waiting for next source transition");
-      return;
     }
-    if (!sourceSnapshotInitialized || !lastSourceSnapshot) {
-      lastSourceSnapshot = current;
-      sourceSnapshotInitialized = true;
-      saveState();
-      lastSuccessAt = new Date().toISOString();
-      lastError = null;
-      console.log("[POSITION BASELINE] openGoldPositions=" + current.positionCount +
-        " netSourceSize=" + current.signedSize +
-        " netSide=" + (current.signedSize > 0 ? "LONG" : current.signedSize < 0 ? "SHORT" : "FLAT") +
-        "; existing position not copied");
-      console.log("[POLL OK] mode=DRY_RUN source=positions deltaProduct=" + PRODUCT_SYMBOL);
-      return;
-    }
-
-    const previous = lastSourceSnapshot;
-    const prevSize = Number(previous.signedSize || 0);
-    const currSize = Number(current.signedSize || 0);
-    const prevSign = Math.sign(prevSize);
-    const currSign = Math.sign(currSize);
-
-    // Require the changed net position to be seen identically twice before acting.
-    // This filters transient API snapshots. Don't advance the baseline on an unconfirmed change.
-    const sameAsBaseline = String(previous.signature || "") === String(current.signature || "") &&
-      prevSize === currSize;
-    if (sameAsBaseline) {
-      pendingSourceSnapshot = null;
-      pendingSourceConfirmations = 0;
-    } else {
-      if (pendingSourceSnapshot &&
-          String(pendingSourceSnapshot.signature || "") === String(current.signature || "") &&
-          Number(pendingSourceSnapshot.signedSize || 0) === currSize) {
-        pendingSourceConfirmations++;
-      } else {
-        pendingSourceSnapshot = current;
-        pendingSourceConfirmations = 1;
-      }
-      if (pendingSourceConfirmations < 2) {
-        lastSuccessAt = new Date().toISOString();
-        lastError = null;
-        console.log("[POSITION CHANGE PENDING] netSide=" +
-          (currSign > 0 ? "LONG" : currSign < 0 ? "SHORT" : "FLAT") +
-          " netSourceSize=" + currSize + " stableConfirmations=" +
-          pendingSourceConfirmations + "/2; no order sent yet");
-        return;
-      }
-      pendingSourceSnapshot = null;
-      pendingSourceConfirmations = 0;
-    }
-
-    if (prevSign === 0 && currSign !== 0) {
-      eventCount++;
-      const plan = positionPlan(current, "OPEN");
-      console.log("[POSITION CHANGE] flat -> " + (currSign > 0 ? "LONG" : "SHORT") + " source net=" + currSize);
-      await copyFill(null, plan);
-    } else if (prevSign !== 0 && currSign === 0) {
-      eventCount++;
-      const plan = positionPlan(previous, "CLOSE");
-      console.log("[POSITION CHANGE] " + (prevSign > 0 ? "LONG" : "SHORT") + " -> flat source");
-      await copyFill(null, plan);
-    } else if (prevSign !== 0 && currSign !== 0 && prevSign !== currSign) {
-      eventCount++;
-      const closePlan = positionPlan(previous, "CLOSE");
-      const openPlan = positionPlan(current, "OPEN");
-      console.log("[POSITION FLIP] source direction changed; close old inverse position before opening new side");
-      const closeConfirmed = await copyFill(null, closePlan);
-      if (closeConfirmed) {
-        await copyFill(null, openPlan);
-      } else {
-        console.error("[FLIP ENTRY BLOCKED] prior Delta close was not confirmed; no new-side entry sent");
-      }
-    } else if (prevSign === currSign && prevSign !== 0 && prevSize !== currSize) {
-      console.log("[POSITION SIZE CHANGE] source net changed from " + prevSize + " to " + currSize +
-        "; target remains fixed at " + FIXED_CONTRACTS + " contract and no extra entry is planned");
-    }
-
-    lastSourceSnapshot = current;
-    saveState();
     lastSuccessAt = new Date().toISOString();
     lastError = null;
-    console.log("[POLL OK] mode=DRY_RUN source=positions openGoldPositions=" +
-      current.positionCount + " netSourceSize=" + currSize +
-      " netSide=" + (currSign > 0 ? "LONG" : currSign < 0 ? "SHORT" : "FLAT") +
-      " eventCount=" + eventCount + " deltaProduct=" + PRODUCT_SYMBOL);
+    console.log("[POLL OK] mode=" + (executionEnabled ? (liveReady ? "LIVE_ARMED" : "LIVE_BLOCKED") : "DRY_RUN") +
+      " source=confirmed_XAUUSD_4TF_events cursor=" + bridgeCursor +
+      " receivedEvents=" + events.length + " eventCount=" + eventCount + " deltaProduct=" + PRODUCT_SYMBOL);
   } catch (error) {
     lastError = String(error && error.message || error).slice(0, 1000);
     console.error("[POLL ERROR] " + lastError);
@@ -634,7 +587,10 @@ async function pollOnce() {
 readState();
 console.log("[START] " + JSON.stringify({
   service: SERVICE,
-  source: "MFP XAUUSD 4TF fills",
+  source: "authenticated confirmed MFP XAUUSD 4TF fill-event feed",
+  eventsUrlConfigured: Boolean(XAU4TF_EVENTS_URL),
+  bridgeTokenConfigured: Boolean(XAU4TF_BRIDGE_TOKEN),
+  bridgeCursor,
   deltaEnvironment: "production",
   deltaBase: DELTA_BASE,
   productId: PRODUCT_ID,
@@ -654,7 +610,7 @@ console.log("[START] " + JSON.stringify({
   stateFile: STATE_FILE,
   productMappingConfigured: Boolean(process.env.DELTA_PRODUCT_MAP_JSON)
 }));
-console.log("[SAFETY] MFP LONG -> Delta SELL; MFP SHORT -> Delta BUY. Live mode requires DRY_RUN_ONLY=false, LIVE_ORDER_EXECUTION=true, DELTA_LIVE_CONFIRMATION=YES, successful Delta preflight, and a fresh activation baseline. Fixed one Delta contract maximum.");
+console.log("[SAFETY] Only authenticated confirmed XAUUSD 4TF OPEN/CLOSE events are consumed; no net-position snapshot fallback. MFP LONG -> Delta SELL; MFP SHORT -> Delta BUY. Live mode requires DRY_RUN_ONLY=false, LIVE_ORDER_EXECUTION=true, DELTA_LIVE_CONFIRMATION=YES, successful Delta preflight. Fixed one Delta contract maximum.");
 if (executionEnabled && (!DELTA_KEY || !DELTA_SECRET)) {
   console.error("[LIVE BLOCKED] Add DELTA_API_KEY and DELTA_API_SECRET to this Railway service.");
 }
